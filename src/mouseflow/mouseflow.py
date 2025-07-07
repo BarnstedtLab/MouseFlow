@@ -189,6 +189,7 @@ def runMF(dlc_dir=os.getcwd(),
     # dgp defines whether to use DeepGraphPose (if True), otherwise resorts to DLC
     # batch defines how many videos to analyse (True for all, integer for the first n videos)
     # of_type sets the optical flow algorithm
+    # manual_anchor={'nosetip': [],'forehead': [], 'mouthtip': [],'chin': [],'tearduct': [],'eyelid2': []} --> it it not necessary to enter all six points if not needed
 
     # TODO: go through DGP files if requested, required beforehand: common naming convention!
     all_face = sorted(glob.glob(os.path.join(dlc_dir, '*DLC*MouseFace*.h5')))
