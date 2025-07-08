@@ -18,6 +18,7 @@ import mouseflow.face_processing as face_processing
 from mouseflow import apply_models
 from mouseflow.utils import config_tensorflow, is_installed, motion_processing, confidence_na, process_raw_data
 from mouseflow.utils.preprocess_video import flip_vid, crop_vid
+from mouseflow.utils.pytorch_utils import config_pytorch
 
 matplotlib.use('TKAgg')
 plt.interactive(False)
@@ -35,6 +36,7 @@ def runDLC(models_dir, vid_dir=os.getcwd(), facekey='face', bodykey='body', dgp=
 
     #  To evade cuDNN error message:
     config_tensorflow(log_level='ERROR', allow_growth=True)
+    device = config_pytorch(benchmark=True, deterministic=False)
 
     # check if DGP is working, otherwise resort to DLC
     if dgp == True and not is_installed('deepgraphpose'):
@@ -44,6 +46,8 @@ def runDLC(models_dir, vid_dir=os.getcwd(), facekey='face', bodykey='body', dgp=
     # check where marker models are located, download if not present
     dlc_faceyaml, dlc_bodyyaml = apply_models.download_models(
         models_dir, facemodel_name, bodymodel_name)
+    face_engine = apply_models.detect_engine(dlc_faceyaml)
+    body_engine = apply_models.detect_engine(dlc_bodyyaml)
 
     # identify video files
     facefiles = []
@@ -115,6 +119,7 @@ def runDLC(models_dir, vid_dir=os.getcwd(), facekey='face', bodykey='body', dgp=
 
     # Apply DLC/DGP Model to each face video
     for facefile in facefiles:
+        print(f">>> PROCESSING FACE (engine: {face_engine})  file: {os.path.basename(facefile)}")
         if glob.glob(os.path.join(dir_out, os.path.basename(facefile)[:-4]+'*.h5')) and not overwrite:
             print(
                 f'Video {os.path.basename(facefile)} already labelled. Skipping ahead...')
@@ -124,11 +129,18 @@ def runDLC(models_dir, vid_dir=os.getcwd(), facekey='face', bodykey='body', dgp=
                 apply_models.apply_dgp(
                     dlc_faceyaml, dir_out, facefile, vid_output)
             else:
-                apply_models.apply_dlc(
-                    filetype, vid_output, dlc_faceyaml, dir_out, facefile, overwrite)
+                if face_engine == 'pytorch':        # DLC3
+                    apply_models.apply_dlc_pt(      
+                        filetype, vid_output, dlc_faceyaml, dir_out,
+                        facefile, overwrite, device=device)
+                else:                               # fallback to TensorFlow DLC2 
+                    apply_models.apply_dlc(
+                        filetype, vid_output, dlc_faceyaml, dir_out,
+                        facefile, overwrite)
 
     # Apply DLC/DGP Model to each body video
     for bodyfile in bodyfiles:
+        print(f">>> PROCESSING BODY (engine: {body_engine})  file: {os.path.basename(bodyfile)}")
         if glob.glob(os.path.join(dir_out, os.path.basename(bodyfile)[:-4]+'*.h5')) and not overwrite:
             print(
                 f'Video {os.path.basename(bodyfile)} already labelled. Skipping ahead...')
@@ -137,8 +149,14 @@ def runDLC(models_dir, vid_dir=os.getcwd(), facekey='face', bodykey='body', dgp=
             if dgp:
                 apply_models.apply_dgp(dlc_bodyyaml, dir_out, bodyfile)
             else:
-                apply_models.apply_dlc(
-                    filetype, vid_output, dlc_bodyyaml, dir_out, bodyfile, overwrite)
+                if body_engine == 'pytorch':        # DLC3
+                    apply_models.apply_dlc_pt(      
+                        filetype, vid_output, dlc_bodyyaml, dir_out,
+                        bodyfile, overwrite, device=device)
+                else:
+                    apply_models.apply_dlc(
+                        filetype, vid_output, dlc_bodyyaml, dir_out,
+                        bodyfile, overwrite)
 
 
 def runMF(dlc_dir=os.getcwd(),
@@ -161,7 +179,9 @@ def runMF(dlc_dir=os.getcwd(),
                 'nose': 1,
                 'mouth': 1,
                 'cheek': 1,
-          }
+          },
+          base_resolution=(782,582), # pass original res so masks scale
+          manual_anchor=None         # allow user-supplied anchor pts
     ):
     # dir defines directory to detect face/body videos, standard: current working directory
     # facekey defines unique string that is contained in all face videos. If none, no face videos will be considered.
@@ -169,18 +189,29 @@ def runMF(dlc_dir=os.getcwd(),
     # dgp defines whether to use DeepGraphPose (if True), otherwise resorts to DLC
     # batch defines how many videos to analyse (True for all, integer for the first n videos)
     # of_type sets the optical flow algorithm
+    # manual_anchor={'nosetip': [],'forehead': [], 'mouthtip': [],'chin': [],'tearduct': [],'eyelid2': []} --> it it not necessary to enter all six points if not needed
 
     # TODO: go through DGP files if requested, required beforehand: common naming convention!
-    facefiles = glob.glob(os.path.join(dlc_dir, '*MouseFace*1030000.h5'))
-    bodyfiles = glob.glob(os.path.join(dlc_dir, '*MouseBody*1030000.h5'))
+    all_face = sorted(glob.glob(os.path.join(dlc_dir, '*DLC*MouseFace*.h5')))
+    all_body = sorted(glob.glob(os.path.join(dlc_dir, '*DLC*MouseBody*.h5')))
 
-    if (len(facefiles) + len(bodyfiles)) == 0:
-        print(
-            f'No marker files found in directory {dlc_dir}. Check directory.')
-    else:
-        print(
-            f'Found the following marker files: \n {[str(f) for f in facefiles]} \n \
-            {[str(f) for f in bodyfiles]}')
+    raw_face  = [p for p in all_face if not p.endswith('_mouseflow.h5')]
+    proc_face = [p for p in all_face if     p.endswith('_mouseflow.h5')]
+    raw_body  = [p for p in all_body if not p.endswith('_mouseflow.h5')]
+    proc_body = [p for p in all_body if     p.endswith('_mouseflow.h5')]
+
+    # Decide what to process based on --overwrite flag
+    if overwrite:
+        facefiles = raw_face
+        bodyfiles = raw_body
+    else:                               
+        facefiles = proc_face if proc_face else raw_face
+        bodyfiles = proc_body if proc_body else raw_body
+
+    if not (facefiles or bodyfiles):    # early-exit if nothing found
+        print(f"No marker files found in {dlc_dir}. Check directory.")
+        return
+    print("Found the following marker files:\n", facefiles, "\n", bodyfiles)
 
     #  FACE ANALYSIS
     for faceDLC in facefiles:
@@ -217,11 +248,10 @@ def runMF(dlc_dir=os.getcwd(),
 
         # Define and save face regions
         facemasks, face_anchor = face_processing.define_faceregions(
-            markers_face_conf, facefile, faceregions_sizes, faceDLC)
-        face_anchor.to_hdf(mf_file, key='face_anchor')
-        hfg = h5py.File(mf_file, 'a')
-        hfg.create_dataset('facemasks', data=facemasks)
-        hfg.close()
+            markers_face_conf, facefile, faceregions_sizes, faceDLC, manual_anchor=manual_anchor, base_resolution=base_resolution)
+        with h5py.File(mf_file, 'w') as hfg:
+            hfg.create_dataset('facemasks', data=facemasks)
+        face_anchor.to_hdf(mf_file, key='face_anchor', mode='a')
 
         # Extract motion in face regions
         if cv2.cuda.getCudaEnabledDeviceCount() == 0:

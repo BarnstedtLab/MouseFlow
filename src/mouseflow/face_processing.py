@@ -53,7 +53,7 @@ def pupilextraction(pupil_markers_xy_confident):
 
 
 # FACE REGIONS
-def define_faceregions(dlc_face, facevid, faceregions_sizes, dlc_file):
+def define_faceregions(dlc_face, facevid, faceregions_sizes, dlc_file, manual_anchor=None, base_resolution=(782,582)):
     # checking on video
     facemp4 = cv2.VideoCapture(facevid)
     firstframe = np.array(facemp4.read()[1][:, :, 0], dtype=np.uint8)
@@ -68,18 +68,32 @@ def define_faceregions(dlc_face, facevid, faceregions_sizes, dlc_file):
                     'chin', 'tearduct', 'eyelid2']
     face_anchor = pd.DataFrame(index=['x', 'y'], columns=anchor_names)
     for anchor_name in anchor_names:
-        if dlc_face[anchor_name, 'x'].isnull().mean() == 1:  # if only missing values, leave empty
-            face_anchor[anchor_name] = np.nan
+        if manual_anchor and anchor_name in manual_anchor:
+            x, y = manual_anchor[anchor_name]
+            face_anchor.at['x', anchor_name] = x
+            face_anchor.at['y', anchor_name] = y
+            plt.scatter(x, y, c='yellow', s=40)
         else:
-            face_anchor[anchor_name] = dlc_face[anchor_name].mean()
-            plt.scatter(dlc_face[anchor_name]['x'],
-                        dlc_face[anchor_name]['y'], alpha=.002)
-            plt.scatter(face_anchor[anchor_name]['x'],
-                        face_anchor[anchor_name]['y'])
+            if dlc_face[anchor_name, 'x'].isnull().mean() == 1:  # if only missing values, leave empty
+                face_anchor.at['x', anchor_name] = np.nan
+                face_anchor.at['y', anchor_name] = np.nan
+            else:
+                x = dlc_face[anchor_name, 'x'].mean()
+                y = dlc_face[anchor_name, 'y'].mean()
+                face_anchor.at['x', anchor_name] = x
+                face_anchor.at['y', anchor_name] = y
+                plt.scatter(dlc_face[anchor_name]['x'],
+                            dlc_face[anchor_name]['y'], alpha=.002)
+                plt.scatter(face_anchor[anchor_name]['x'],
+                            face_anchor[anchor_name]['y'])
+    face_anchor['eyelid_bottom'] = face_anchor['eyelid2'] # in DLC the keypoints are labeled with 1,2,3,etc., 
+    face_anchor = face_anchor.astype(float)               # ensure numeric
 
     # scaling of distances
-    scale_width = firstframe.shape[1] / 782
-    scale_height = firstframe.shape[0] / 582
+    w0, h0 = base_resolution                                   # change to match the res of recorded videos
+    W, H = firstframe.shape[1], firstframe.shape[0]
+    scale_width  = W / w0
+    scale_height = H / h0
     scaling = np.mean([scale_width, scale_height])
     faceregions_sizes = {x: int(k * scaling)
                          for (x, k) in faceregions_sizes.items()}
@@ -102,10 +116,10 @@ def define_faceregions(dlc_face, facevid, faceregions_sizes, dlc_file):
         centre_whiskers = tuple(np.round(centre_whiskers).astype(
             int) + [int(s*scaling) for s in [-10*scaling, 70*scaling]])
         mask_whiskers = create_mask(
-            centre_whiskers, faceregions_sizes['whiskers'], 100, 100, 0)
+            centre_whiskers, faceregions_sizes['whiskers'], 120, 120, 0)
 
     # nose inference
-    if not pd.isna(face_anchor.nosetip)[0]:
+    if not pd.isna(face_anchor.nosetip).iloc[0]:
         centre_nose = tuple(np.round(face_anchor.nosetip).astype(
             int) + [int(s*scaling) for s in [50*scaling, 0]])
         mask_nose = create_mask(
@@ -119,10 +133,12 @@ def define_faceregions(dlc_face, facevid, faceregions_sizes, dlc_file):
     else:
         centre_mouth = tuple(np.round(
             face_anchor.mouthtip + (face_anchor.chin - face_anchor.mouthtip)/3).astype(int))
-        angle_mouth = math.degrees(math.atan2((face_anchor.chin[
-            1] - face_anchor.mouthtip[1]), (face_anchor.chin[0] - face_anchor.mouthtip[0])))
+        x_chin, y_chin = face_anchor.loc['x', 'chin'], face_anchor.loc['y', 'chin']
+        x_mouth, y_mouth = face_anchor.loc['x', 'mouthtip'], face_anchor.loc['y', 'mouthtip']
+        angle_mouth = math.degrees(math.atan2(
+            (y_chin - y_mouth), (x_chin - x_mouth)))
         mask_mouth = create_mask(
-            centre_mouth, faceregions_sizes['mouth'], 160, 60, angle_mouth)
+            centre_mouth, faceregions_sizes['mouth'], 180, 70, angle_mouth)
 
     # cheek inference ellipse
     if any([np.isnan(t) for t in face_anchor.chin]):
@@ -131,11 +147,11 @@ def define_faceregions(dlc_face, facevid, faceregions_sizes, dlc_file):
         centre_cheek = tuple(np.round(face_anchor.eyelid_bottom +
                              (face_anchor.chin - face_anchor.eyelid_bottom)/2).astype(int))
         mask_cheek = create_mask(
-            centre_cheek, faceregions_sizes['cheek'], 180, 100, 0)
+            centre_cheek, faceregions_sizes['cheek'], 200, 100, 0)
         
     masks = [mask_nose, mask_whiskers, mask_mouth, mask_cheek]
     if dlc_file:
-        plt.savefig(dlc_file[:-4] + "face_regions.png");
+        plt.savefig(dlc_file[:-3] + "_face_regions.png");
     plt.close('all');
 
     return masks, face_anchor
