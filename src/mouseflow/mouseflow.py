@@ -174,13 +174,8 @@ def runMF(dlc_dir=os.getcwd(),
               'MotionEnergy': 0.25,
           },
           na_limit=0.25,
-          faceregions_sizes={
-                'whiskers': 1,
-                'nose': 1,
-                'mouth': 1,
-                'cheek': 1,
-          },
-          base_resolution=(782,582), # pass original res so masks scale
+          faceregions_sizes=None,
+          base_resolution=None,
           manual_anchor=None         # allow user-supplied anchor pts
     ):
     # dir defines directory to detect face/body videos, standard: current working directory
@@ -234,7 +229,7 @@ def runMF(dlc_dir=os.getcwd(),
         markers_face_conf = confidence_na(dgp, conf_thresh, markers_face)
 
         # Interpolating missing data up to <na_limits>
-        interpolation_limits_frames = {x: int(k * FaceCam_FPS)
+        interpolation_limits_frames = {x: max(1, max(int(k * FaceCam_FPS)))
                                        for (x, k) in interpolation_limits_sec.items()}
         markers_face_conf.loc[:, ['pupil'+str(n+1) for n in range(6)]] = \
             markers_face_conf.loc[:, ['pupil'+str(n+1) for n in range(6)]].interpolate(
@@ -248,7 +243,7 @@ def runMF(dlc_dir=os.getcwd(),
 
         # Define and save face regions
         facemasks, face_anchor = face_processing.define_faceregions(
-            markers_face_conf, facefile, faceregions_sizes, faceDLC, manual_anchor=manual_anchor, base_resolution=base_resolution)
+            markers_face_conf, facefile, faceDLC, manual_anchor=manual_anchor, base_resolution=base_resolution, faceregions_sizes=faceregions_sizes)
         with h5py.File(mf_file, 'w') as hfg:
             hfg.create_dataset('facemasks', data=facemasks)
         face_anchor.to_hdf(mf_file, key='face_anchor', mode='a')

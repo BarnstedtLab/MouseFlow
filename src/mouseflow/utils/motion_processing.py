@@ -644,7 +644,7 @@ def freq_analysis2(x, fps, rollwin=75, min_periods=50, conf=0.5):
     w_clean[error>(fps/100)] = np.nan
     w_clean[w_clean<0] = np.nan
     w_clean = w_clean.interpolate(method='polynomial', order=3, limit=int(fps*2))
-    w_smooth = w_clean.rolling(int(rollwin/3), center=True, min_periods=int(min_periods/3)).mean(window='gaussian')
+    w_smooth = (w_clean.rolling(window=int(rollwin/3), win_type='gaussian', center=True, min_periods=int(min_periods/3),).mean(std=rollwin/3))
     f_smooth = w_smooth/(2.*np.pi)*fps
     return f_smooth
 
@@ -659,12 +659,19 @@ def dlc_pointphasecorr(point1, point2, body_conf_thresh=.5, body_interpolation_l
     return pd.Series(running_corr)
 
 
-def hilbert_peaks(x, fps, fc=10, butterN=5, peakprom=1.5):
+def hilbert_peaks(x, fps, fc=None, butterN=5, peakprom=1.5):
     env = np.abs(signal.hilbert(x))
+    nyquist = fps/2.0
     # Low-Pass Butter filter:
-    w = fc / (fps / 2)  # Normalize the frequency to SamplingFrequency
+    # If no cutoff given or too high, use half‑Nyquist
+    if fc is None or fc >= nyquist:
+        fc_used = nyquist * 0.5
+    else:
+        fc_used = fc
+    w = fc_used / nyquist  # always < 1
     b, a = signal.butter(butterN, w, 'low')
-    mouth_envfilt = pd.Series(signal.filtfilt(b, a, env)).shift(12)
+    shift_amt = int(0.6 * fps)
+    mouth_envfilt = pd.Series(signal.filtfilt(b, a, env)).shift(shift_amt)
     peaks = signal.find_peaks(mouth_envfilt, prominence=peakprom)[0]
     peakbool = np.zeros(len(x))
     peakbool[peaks] = 1

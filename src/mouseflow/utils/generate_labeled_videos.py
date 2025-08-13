@@ -55,8 +55,7 @@ def shift5(arr, num, fill_value=np.nan):
 def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
                               generate_frames=1000, startframe=500, use_dark_background=True, resultsdir=False,
                               cols_to_plot=['PupilDiam', 'PupilX', 'MotionEnergy_Mouth', 'OFang_Whiskerpad', 'OFang_Nose'],
-                              blend_gray_optflow=0.5, smooth_data=15, dlc_conf_thresh=None, processing_stage=None): 
-                                                                                            # adding processing stage since the dataframe is MultiIndex --> for downstream processing                        
+                              blend_gray_optflow=0.5, smooth_data=15, dlc_conf_thresh=None, processing_stage=None, make_video=True):                        
     facemp4 = cv2.VideoCapture(path_vid_face)
     facemp4.set(cv2.CAP_PROP_POS_FRAMES, startframe) # jump straight to the first frame wanted (explicit constant = clearer than “1”)
     FaceCam_FPS = facemp4.get(cv2.CAP_PROP_FPS)
@@ -243,8 +242,10 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
 
             # Eye-detail crop
             axd['upper right'].cla()
-            pupilmeanx = face[('smooth','PupilX')].mean().round().astype(int)
-            pupilmeany = face[('smooth','PupilY')].mean().round().astype(int)
+            meanx = face[('smooth','PupilX')].mean()
+            pupilmeanx = np.float64(meanx).round().astype(int)
+            meany = face[('smooth','PupilY')].mean()
+            pupilmeany = np.float64(meany).round().astype(int)
             eye_w, eye_h = 240, 180
             x0, y0 = pupilmeanx - eye_w//2, pupilmeany - eye_h//2
             eye_patch = current_frame_gray[y0:y0+eye_h, x0:x0+eye_w]
@@ -309,6 +310,20 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
             if current_frame is None:
                 break
     facemp4.release()
+    if make_video:
+        frames = sorted(glob.glob(os.path.join(resultsdir, 'file_*.png')))
+        if not frames:
+            raise RuntimeError("No frames found in %r" % resultsdir)
+        vid_dirout = os.path.join(resultsdir, 'labeled_face_video.mp4')
+        first = cv2.imread(frames[0])
+        h, w = first.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(vid_dirout, fourcc, FaceCam_FPS, (w, h))
+        for fname in frames:
+            img = cv2.imread(fname)
+            writer.write(img)
+        writer.release()
+        print(f"Saved labeled video to {vid_dirout}")
 
 
 
