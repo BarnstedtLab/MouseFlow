@@ -1,290 +1,238 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import glob
 import os
 
 # import gdown
 import cv2
 import h5py
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import zscore
 
+from dataclasses import dataclass
+from pathlib import Path
+
 import mouseflow.body_processing as body_processing
 import mouseflow.face_processing as face_processing
-from mouseflow import apply_models
-from mouseflow.utils import config_tensorflow, is_installed, motion_processing, confidence_na, process_raw_data
-from mouseflow.utils.preprocess_video import flip_vid, crop_vid
-from mouseflow.utils.pytorch_utils import config_pytorch
-
-matplotlib.use('TKAgg')
-plt.interactive(False)
+from mouseflow.utils import motion_processing, confidence_na, process_raw_data
 
 
-def runDLC(models_dir, vid_dir=os.getcwd(), facekey='face', bodykey='body', dgp=True, batch='all', overwrite=False,
-           filetype='.mp4', vid_output=1000, body_facing='right', face_facing='left', face_crop=[], body_crop=[],
-           facemodel_name='MouseFace-Barnstedt-2019-08-21', bodymodel_name='MouseBody-Barnstedt-2019-09-09'):
-    # vid_dir defines directory to detect face/body videos, standard: current working directory
-    # facekey defines unique string that is contained in all face videos. If None, no face videos will be considered.
-    # bodykey defines unique string that is contained in all body videos. If None, no body videos will be considered.
-    # dgp defines whether to use DeepGraphPose (if True), otherwise resorts to DLC
-    # batch defines how many videos to analyse ('all' for all, integer for the first n videos)
-    # face/body_crop allows initial cropping of video in the form [x_start, x_end, y_start, y_end]
+@dataclass(frozen=True)
+class MFConfig:
+    dgp: bool = True
+    conf_thresh: float | None = None
+    interpolation_limits_sec: dict = ...
+    smoothing_windows_sec: dict = ...
+    na_limit: float = 0.25
+    faceregions_sizes: dict | None = None
+    base_resolution: tuple[int,int] | None = None
+    manual_anchor: dict | None = None
+    of_backend: str = "RAFT"
+    overwrite: bool = False
 
-    #  To evade cuDNN error message:
-    config_tensorflow(log_level='ERROR', allow_growth=True)
-    device = config_pytorch(benchmark=True, deterministic=False)
+class MouseFlow:
+    def __init__(self, dlc_dir: str | Path, cfg: MFConfig):
+        self.dlc_dir = Path(dlc_dir)
+        self.cfg = cfg
 
-    # check if DGP is working, otherwise resort to DLC
-    if dgp == True and not is_installed('deepgraphpose'):
-        print('DGP import error; working with DLC...')
-        dgp = False
+    def run(self):
+        files = self._analysis_files()
+        face_files = files['face_files']
+        body_files = files['body_files']
 
-    # check where marker models are located, download if not present
-    dlc_faceyaml, dlc_bodyyaml = apply_models.download_models(
-        models_dir, facemodel_name, bodymodel_name)
-    face_engine = apply_models.detect_engine(dlc_faceyaml)
-    body_engine = apply_models.detect_engine(dlc_bodyyaml)
+        if not face_files:
+            raise RuntimeWarning(f"No face files found to process in {self.dlc_dir}.")
+        if not body_files:
+            raise RuntimeWarning(f"No body files found to process in {self.dlc_dir}.")
+        
+        for ff in face_files:
+            self.analyse_face(ff)
+        for bf in body_files:
+            self.analyse_body(bf)
 
-    # identify video files
-    facefiles = []
-    bodyfiles = []
-    if os.path.isfile(vid_dir):
-        if facekey in vid_dir:
-            facefiles = [vid_dir]
-        elif bodykey in vid_dir:
-            bodyfiles = [vid_dir]
-        else:
-            print(
-                f'Need to pass <facekey> or <bodykey> argument to classify video {vid_dir}.')
-    if facekey == True:
-        facefiles = [vid_dir]
-    elif bodykey == True:
-        bodyfiles = [vid_dir]
-    elif facekey == '' or facekey == False or facekey == None:
-        bodyfiles = glob.glob(os.path.join(vid_dir, '*'+bodykey+'*'+filetype))
-    elif bodykey == '' or bodykey == False or bodykey == None:
-        facefiles = glob.glob(os.path.join(vid_dir, '*'+facekey+'*'+filetype))
-    else:
-        facefiles = glob.glob(os.path.join(vid_dir, '*'+facekey+'*'+filetype))
-        bodyfiles = glob.glob(os.path.join(vid_dir, '*'+bodykey+'*'+filetype))
-
-    # cropping videos
-    facefiles = [f for f in facefiles if '_cropped.*' not in f]  # sort out already cropped videos
-    bodyfiles = [b for b in bodyfiles if '_cropped.*' not in b]  # sort out already cropped videos
-    if face_crop:
-        facefiles_cropped = []
-        for vid in facefiles:
-            facefiles_cropped.append(crop_vid(vid, face_crop))
-        facefiles = facefiles_cropped
-    if body_crop:
-        bodyfiles_cropped = []
-        for vid in bodyfiles:
-            bodyfiles_cropped.append(crop_vid(vid, body_crop))
-        bodyfiles = bodyfiles_cropped
-
-    # flipping videos
-    facefiles = [f for f in facefiles if '_flipped.*' not in f]  # sort out already flipped videos
-    bodyfiles = [b for b in bodyfiles if '_flipped.*' not in b]  # sort out already flipped videos
-    if face_facing != 'left':
-        facefiles_flipped = []
-        for vid in facefiles:
-            facefiles_flipped.append(flip_vid(vid, horizontal=True))
-        facefiles = facefiles_flipped
-    if body_facing != 'right':
-        bodyfiles_flipped = []
-        for vid in bodyfiles:
-            bodyfiles_flipped.append(flip_vid(vid, horizontal=True))
-        bodyfiles = bodyfiles_flipped
-
-    # batch mode (if user specifies a number n, it will only process the first n files)
-    try:
-        batch = int(batch)
-        facefiles = facefiles[:batch]
-        bodyfiles = bodyfiles[:batch]
-        print(f'Only processing first {batch} face and body videos...')
-    except ValueError:
-        pass
-
-    # set directories
-    if os.path.isdir(vid_dir):
-        dir_out = os.path.join(vid_dir, 'mouseflow')
-    else:
-        dir_out = os.path.join(os.path.dirname(vid_dir), 'mouseflow')
-    if not os.path.exists(dir_out):
-        os.makedirs(dir_out)
-
-    # Apply DLC/DGP Model to each face video
-    for facefile in facefiles:
-        print(f">>> PROCESSING FACE (engine: {face_engine})  file: {os.path.basename(facefile)}")
-        if glob.glob(os.path.join(dir_out, os.path.basename(facefile)[:-4]+'*.h5')) and not overwrite:
-            print(
-                f'Video {os.path.basename(facefile)} already labelled. Skipping ahead...')
-        else:
-            print("Applying ", dlc_faceyaml, " on FACE video: ", facefile)
-            if dgp:
-                apply_models.apply_dgp(
-                    dlc_faceyaml, dir_out, facefile, vid_output)
-            else:
-                if face_engine == 'pytorch':        # DLC3
-                    apply_models.apply_dlc_pt(      
-                        filetype, vid_output, dlc_faceyaml, dir_out,
-                        facefile, overwrite, device=device)
-                else:                               # fallback to TensorFlow DLC2 
-                    apply_models.apply_dlc(
-                        filetype, vid_output, dlc_faceyaml, dir_out,
-                        facefile, overwrite)
-
-    # Apply DLC/DGP Model to each body video
-    for bodyfile in bodyfiles:
-        print(f">>> PROCESSING BODY (engine: {body_engine})  file: {os.path.basename(bodyfile)}")
-        if glob.glob(os.path.join(dir_out, os.path.basename(bodyfile)[:-4]+'*.h5')) and not overwrite:
-            print(
-                f'Video {os.path.basename(bodyfile)} already labelled. Skipping ahead...')
-        else:
-            print("Applying ", dlc_bodyyaml, " on BODY video: ", bodyfile)
-            if dgp:
-                apply_models.apply_dgp(dlc_bodyyaml, dir_out, bodyfile)
-            else:
-                if body_engine == 'pytorch':        # DLC3
-                    apply_models.apply_dlc_pt(      
-                        filetype, vid_output, dlc_bodyyaml, dir_out,
-                        bodyfile, overwrite, device=device)
-                else:
-                    apply_models.apply_dlc(
-                        filetype, vid_output, dlc_bodyyaml, dir_out,
-                        bodyfile, overwrite)
-
-
-def runMF(dlc_dir=os.getcwd(),
-          overwrite=False,
-          dgp=True,
-          conf_thresh=None,
-          interpolation_limits_sec={
-              'pupil': 2,
-              'eyelid': 1,
-          },
-          smoothing_windows_sec={
-              'PupilDiam': 1,
-              'PupilMotion': 0.25,
-              'eyelid': 0.1,
-              'MotionEnergy': 0.25,
-          },
-          na_limit=0.25,
-          faceregions_sizes=None,
-          base_resolution=None,
-          manual_anchor=None         # allow user-supplied anchor pts
-    ):
-    # dir defines directory to detect face/body videos, standard: current working directory
-    # facekey defines unique string that is contained in all face videos. If none, no face videos will be considered.
-    # bodykey defines unique string that is contained in all face videos. If none, no face videos will be considered.
-    # dgp defines whether to use DeepGraphPose (if True), otherwise resorts to DLC
-    # batch defines how many videos to analyse (True for all, integer for the first n videos)
-    # of_type sets the optical flow algorithm
-    # manual_anchor={'nosetip': [],'forehead': [], 'mouthtip': [],'chin': [],'tearduct': [],'eyelid2': []} --> it it not necessary to enter all six points if not needed
-
-    # TODO: go through DGP files if requested, required beforehand: common naming convention!
-    all_face = sorted(glob.glob(os.path.join(dlc_dir, '*DLC*MouseFace*.h5')))
-    all_body = sorted(glob.glob(os.path.join(dlc_dir, '*DLC*MouseBody*.h5')))
-
-    raw_face  = [p for p in all_face if not p.endswith('_mouseflow.h5')]
-    proc_face = [p for p in all_face if     p.endswith('_mouseflow.h5')]
-    raw_body  = [p for p in all_body if not p.endswith('_mouseflow.h5')]
-    proc_body = [p for p in all_body if     p.endswith('_mouseflow.h5')]
-
-    # Decide what to process based on --overwrite flag
-    if overwrite:
-        facefiles = raw_face
-        bodyfiles = raw_body
-    else:                               
-        facefiles = proc_face if proc_face else raw_face
-        bodyfiles = proc_body if proc_body else raw_body
-
-    if not (facefiles or bodyfiles):    # early-exit if nothing found
-        print(f"No marker files found in {dlc_dir}. Check directory.")
-        return
-    print("Found the following marker files:\n", facefiles, "\n", bodyfiles)
-
-    #  FACE ANALYSIS
-    for faceDLC in facefiles:
-        if os.path.exists(mf_file) and not overwrite:
-            print(mf_file + ' data already analysed. Skipping ahead...')
-            continue
-
-        print('Processing DLC data from '+faceDLC)
-        mf_file = faceDLC[:-3] + '_mouseflow.h5'
-        facefile = glob.glob(os.path.join(os.path.dirname(
-            dlc_dir), os.path.basename(faceDLC).split('DLC')[0] + '*'))[0]
-        facevidcap = cv2.VideoCapture(facefile)
-        FaceCam_FPS = facevidcap.get(cv2.CAP_PROP_FPS)
-
+    def _load_markers(self, file: Path):
         # Reading in DLC/DGP file
-        markers_face = pd.read_hdf(faceDLC, mode='r')
-        markers_face.columns = markers_face.columns.droplevel(0)
+        markers = pd.read_hdf(file, mode='r')
+        markers.columns = markers.columns.droplevel(0)
+        return markers
+    
+    def _face_to_h5(self, out_file: Path, face_masks, face_anchor: pd.DataFrame, face: pd.DataFrame):
+        mf_out_file = str(out_file)
+        with h5py.File(mf_out_file, "a") as out:
+            if "facemasks" in out:
+                del out["facemasks"]
+            out.create_dataset("facemasks", data=face_masks)
+        face_anchor.to_hdf(mf_out_file, key="face_anchor", mode="a")
+        face.to_hdf(mf_out_file, key="face", mode="a")
 
-        # Filling low-confidence markers with NAN
-        markers_face_conf = confidence_na(dgp, conf_thresh, markers_face)
+    def _interpolation_limits(self, fps: float, min_frames: int=1):
+        out : dict[str, int] = {}
+        for key, val in self.cfg.interpolation_limits_sec.items():
+            if val is None or (isinstance(val, (int, float)) and val <= 0):
+                out[key] = min_frames
+            else:
+                out[key] = int(max(min_frames, round(float(val) * float(fps))))
+        return out
+   
+    def _get_video_for_marker(self, marker_file: Path):
+        VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".m4v")
+        """
+        Return the single video in dlc_dir matching the marker file.
+        Assumes 0 or 1 matching video per marker.
+        Match rule: video filename starts with the marker name portion before 'DLC' (case-insensitive).
+        """
 
-        # Interpolating missing data up to <na_limits>
-        interpolation_limits_frames = {x: max(1, max(int(k * FaceCam_FPS)))
-                                       for (x, k) in interpolation_limits_sec.items()}
-        markers_face_conf.loc[:, ['pupil'+str(n+1) for n in range(6)]] = \
-            markers_face_conf.loc[:, ['pupil'+str(n+1) for n in range(6)]].interpolate(
-                method='linear', limit=interpolation_limits_frames['pupil'])
+        if marker_file.suffix.lower() != ".h5":
+            raise ValueError(f"Expected .h5 marker file, got: {marker_file}")
+
+        base = marker_file.stem
+        # Find 'DLC' case-insensitively without regex
+        i = base.lower().find("dlc")
+        prefix = base[:i] if i != -1 else base
+        prefix = prefix.rstrip("_-. ")
+
+        candidates = [
+            p for p in self.dlc_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTS and p.name.startswith(prefix)
+        ]
+
+        if not candidates:
+            raise FileNotFoundError(f"No video starting with '{prefix}' in {self.dlc_dir}")
+
+        if len(candidates) > 1:
+            raise RuntimeError(
+                f"Expected at most one video for '{marker_file.name}', found: {[c.name for c in candidates]}")
+
+        return candidates[0]
+
+    def _video_info(self, video_path: Path | str):
+        """
+        Open a video and return (fps, width, height, cap).
+        Caller owns 'cap' and should release it when done.
+        Raises OSError if the file cannot be opened or has invalid properties.
+        """
+        video_path = str(video_path)
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            cap.release()
+            raise OSError(f"Failed to open video: {video_path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        if fps <= 0:
+            raise OSError(f"Invalid FPS ({fps}) for: {video_path}")
+
+        if width <= 0 or height <= 0:
+            cap.release()
+            raise OSError(f"Invalid frame size {width}x{height} for: {video_path}")
+
+        return float(fps), width, height, cap
+
+    def _analysis_files(self):
+        if self.dlc_dir is None:
+            raise RuntimeError("No DLC directory defined.")
+        d = Path(self.dlc_dir)
+
+        face_raw = sorted(d.glob('*DLC*MouseFace*.h5'))
+        body_raw = sorted(d.glob('*DLC*MouseBody*.h5'))
+
+        def needs_processing(p: Path) -> bool:
+            mf = p.with_name(p.stem + '_mouseflow.h5')
+            return self.cfg.overwrite or not mf.exists()
+
+        face_files = [p for p in face_raw if needs_processing(p)]
+        body_files = [p for p in body_raw if needs_processing(p)]
+
+        return {'face_files': face_files, 'body_files': body_files}
+    
+    def _has_gpu_support(self):
+        import torch
+        has_cv2_cuda = hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
+        has_pytorch_gpu = torch.cuda.is_available()
+
+        if not has_cv2_cuda and self.cfg.of_backend == "Farneback":
+            print("No Opencv with GPU support detected, sorry. Ensure to have a working nvidia GPU." \
+                "If you have, try switching mf_config.of_backend to 'RAFT' ")
+            return False
+        
+        if not has_pytorch_gpu and self.cfg.of_backend == "RAFT":
+            print("No Pytorch with GPU support detected, sorry. Ensure to have a working nvidia GPU." \
+                "If you have, try switching mf_config.of_backend to 'Farneback' ")
+            return False
+
+        if has_cv2_cuda and self.cfg.of_backend == "Farneback":
+            return True
+        
+        if has_pytorch_gpu and self.cfg.of_backend == "RAFT":
+            return True
+        return False # safe fallback
+
+    
+    # Actual analysis
+
+    # Face analysis
+    def analyse_face(self, face_file: Path):
+        out_file = face_file.with_name(face_file.stem + '_mouseflow.h5')
+        if out_file.exists() and not self.cfg.overwrite:
+            print(f"{out_file} already analysed, skipping ahead...")
+            return
+        markers_face = self._load_markers(face_file)
+        video_file = self._get_video_for_marker(face_file)
+        fps, w, h, cap = self._video_info(video_file)
+        markers_face = confidence_na(self.cfg.dgp, self.cfg.conf_thresh, markers_face)
+        interpolation_limits = self._interpolation_limits(fps)
+
+        markers_face.loc[:, ['pupil'+str(n+1) for n in range(6)]] = \
+            markers_face.loc[:, ['pupil'+str(n+1) for n in range(6)]].interpolate(
+                method='linear', limit=interpolation_limits['pupil'])
 
         # Extracting pupil and eyelid data
         pupil_raw = face_processing.pupilextraction(
-            markers_face_conf[['pupil'+str(n+1) for n in range(6)]].values)
+            markers_face[['pupil'+str(n+1) for n in range(6)]].values)
         eyelid_dist_raw = pd.Series(motion_processing.dlc_pointdistance2(
-            markers_face_conf['eyelid1'], markers_face_conf['eyelid2']), name='EyeLidDist')
+            markers_face['eyelid1'], markers_face['eyelid2']), name='EyeLidDist')
 
         # Define and save face regions
-        facemasks, face_anchor = face_processing.define_faceregions(
-            markers_face_conf, facefile, faceDLC, manual_anchor=manual_anchor, base_resolution=base_resolution, faceregions_sizes=faceregions_sizes)
-        with h5py.File(mf_file, 'w') as hfg:
-            hfg.create_dataset('facemasks', data=facemasks)
-        face_anchor.to_hdf(mf_file, key='face_anchor', mode='a')
+        face_masks, face_anchor = face_processing.define_faceregions(
+            markers_face, video_file, face_file, manual_anchor=self.cfg.manual_anchor,
+            base_resolution=self.cfg.base_resolution, faceregions_sizes=self.cfg.faceregions_sizes
+        )
 
         # Extract motion in face regions
-        if cv2.cuda.getCudaEnabledDeviceCount() == 0:
+        if not self._has_gpu_support():
             print("No CUDA support detected. Processing without optical flow...")
             face_motion = face_processing.facemotion_nocuda(
-                facefile, facemasks)
+                video_file, face_masks)
             face_raw = pd.concat([pupil_raw, eyelid_dist_raw, face_motion], axis=1)
         else:
-            face_motion = face_processing.facemotion(facefile, facemasks)
+            face_motion = face_processing.facemotion(video_file, face_masks, backend=self.cfg.of_backend)
             whisk_freq = motion_processing.freq_analysis2(
-                face_motion['OFang_Whiskerpad'], FaceCam_FPS, rollwin=FaceCam_FPS, min_periods=int(FaceCam_FPS*.67))
+                face_motion['OFang_Whiskerpad'], fps, rollwin=fps, min_periods=int(fps*.67))
             sniff_freq = motion_processing.freq_analysis2(
-                face_motion['OFang_Nose'],       FaceCam_FPS, rollwin=FaceCam_FPS, min_periods=int(FaceCam_FPS*.67))
+                face_motion['OFang_Nose'],       fps, rollwin=fps, min_periods=int(fps*.67))
             chewenv, chew = motion_processing.hilbert_peaks(
-                face_motion['OFang_Mouth'],    FaceCam_FPS)
+                face_motion['OFang_Mouth'],    fps)
             face_freq = pd.DataFrame(
                 {'Whisking_freq': whisk_freq, 'Sniff_freq': sniff_freq, 'Chewing_Envelope': chewenv, 'Chew': chew})
             face_raw = pd.concat([pupil_raw, eyelid_dist_raw, face_motion, face_freq], axis=1)
+        cap.release()
+        face = process_raw_data(self.cfg.smoothing_windows_sec, self.cfg.na_limit, fps, interpolation_limits, face_raw)
+        self._face_to_h5(out_file, face_masks, face_anchor, face)
 
-        # further process raw data and save
-        face = process_raw_data(smoothing_windows_sec, na_limit, FaceCam_FPS, interpolation_limits_frames, face_raw)
-        face.to_hdf(mf_file, key='face')
-
-    #  BODY ANALYSIS
-    for bodyDLC in bodyfiles:
-
-        # Load Body Data
-        markers_body = pd.read_hdf(bodyDLC, mode='r')
-        markers_body.columns = markers_body.columns.droplevel(0)
-
-        # Get body video info
-        bodyfile = glob.glob(os.path.join(os.path.dirname(
-            dlc_dir), os.path.basename(bodyDLC).split('DLC')[0] + '*'))[0]
-        BodyCam_FPS = cv2.VideoCapture(bodyfile).get(cv2.CAP_PROP_FPS)
-        BodyCam_width = cv2.VideoCapture(
-            bodyfile).get(cv2.CAP_PROP_FRAME_WIDTH)
-        BodyCam_height = cv2.VideoCapture(
-            bodyfile).get(cv2.CAP_PROP_FRAME_HEIGHT)
+    def analyse_body(self, body_file: Path):
+        out_file = body_file.with_name(body_file.stem + '_mouseflow.h5')
+        if out_file.exists() and not self.cfg.overwrite:
+            print(f"{out_file} already analysed, skipping ahead...")
+            return
+        
+        markers_body = self._load_markers(body_file)
+        video_file = self._get_video_for_marker(body_file)
+        fps, w, h, cap = self._video_info(video_file)
+        markers_body = confidence_na(self.cfg.dgp, self.cfg.conf_thresh, markers_body)
+        interpolation_limits = self._interpolation_limits(fps)
 
         # Paw motion
         motion_frontpaw = body_processing.dlc_pointmotion(
@@ -302,7 +250,7 @@ def runMF(dlc_dir=os.getcwd(),
         rightpaws_fbdiff = body_processing.dlc_pointdistance(
             markers_body['paw_front-right2'], markers_body['paw_back-right2'])
         stride_freq = body_processing.freq_analysis(
-            rightpaws_fbdiff, BodyCam_FPS, M=128)
+            rightpaws_fbdiff, fps, M=128)
 
         # Mouth motion
         motion_mouth = body_processing.dlc_pointmotion(
@@ -313,11 +261,11 @@ def runMF(dlc_dir=os.getcwd(),
             markers_body['tail1'], markers_body['tail2'], markers_body['tail3'])
         tailroot_level = -zscore(markers_body['tail1', 'y'])
 
-        cylinder_mask = np.zeros([BodyCam_height, BodyCam_width])
+        cylinder_mask = np.zeros([h, w])
         cylinder_mask[int(np.nanpercentile(
-            markers_body['paw_back-right1', 'y'].values, 99) + 30):, :int(BodyCam_width/3)] = 1
+            markers_body['paw_back-right1', 'y'].values, 99) + 30):, :int(w/3)] = 1
         cylinder_motion = body_processing.cylinder_motion(
-            bodyfile, cylinder_mask)
+            video_file, cylinder_mask)
 
         body_raw = pd.DataFrame({
             'PointMotion_FrontPaw': motion_frontpaw.raw_distance,
@@ -338,5 +286,37 @@ def runMF(dlc_dir=os.getcwd(),
         })
 
         # further process raw data and save
-        body = process_raw_data(smoothing_windows_sec, na_limit, FaceCam_FPS, interpolation_limits_frames, body_raw)
-        body.to_hdf(mf_file, key='body')
+        cap.release()
+        body = process_raw_data(self.cfg.smoothing_windows_sec, self.cfg.na_limit, fps, interpolation_limits, body_raw)
+        body.to_hdf(out_file, key='body')
+
+
+def runMF(dlc_dir=os.getcwd(),
+          overwrite=False,
+          dgp=True,
+          conf_thresh=None,
+          interpolation_limits_sec={
+              'pupil': 2,
+              'eyelid': 1,
+          },
+          smoothing_windows_sec={
+              'PupilDiam': 1,
+              'PupilMotion': 0.25,
+              'eyelid': 0.1,
+              'MotionEnergy': 0.25,
+          },
+          na_limit=0.25,
+          faceregions_sizes=None,
+          base_resolution=None,
+          manual_anchor=None         
+    ):
+
+        cfg = MFConfig(dgp, conf_thresh,
+                    interpolation_limits_sec, smoothing_windows_sec,
+                    na_limit, faceregions_sizes,
+                    base_resolution, manual_anchor, overwrite
+        )
+
+        mf = MouseFlow(dlc_dir, cfg)
+        mf.run()
+

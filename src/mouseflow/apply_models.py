@@ -8,14 +8,14 @@ import yaml
 def detect_engine(cfg_path):
     """
     Return 'pytorch' if this config belongs to DLC 3,
-    otherwise 'tensorflow'.
+    otherwise None.
     """
     with open(cfg_path, 'r') as f:
         cfg = yaml.safe_load(f)
     if (os.path.basename(cfg_path).startswith('pytorch_')   # DLC 3 puts a prefix
         or cfg.get('engine') == 'pytorch'):                 # or DLC 3 may embed key
         return 'pytorch'
-    return 'tensorflow'
+    return None
 
 def download_models(models_dir, facemodel_name, bodymodel_name):   
     if not os.path.exists(os.path.join(models_dir, facemodel_name)):
@@ -26,17 +26,10 @@ def download_models(models_dir, facemodel_name, bodymodel_name):
         dlc_body_url = 'https://drive.google.com/drive/folders/1_XPPyzaxMjQ901vJCwtv1g_h5DYWHM8j?usp=sharing'
         gdown.download_folder(dlc_body_url, models_dir, quiet=True, use_cookies=False)
     
-    dlc_faceyaml = os.path.join(models_dir, facemodel_name, 'config.yaml')
-    dlc_bodyyaml = os.path.join(models_dir, bodymodel_name, 'config.yaml')
-    # TensorFlow config (DLC 2)
-    tf_faceyaml = os.path.join(models_dir, facemodel_name, 'config.yaml')
-    tf_bodyyaml = os.path.join(models_dir, bodymodel_name, 'config.yaml')
     # PyTorch config (DLC 3)
-    pt_faceyaml = os.path.join(models_dir, facemodel_name, 'pytorch_config.yaml')
-    pt_bodyyaml = os.path.join(models_dir, bodymodel_name, 'pytorch_config.yaml')
-    # Prefer PyTorch if it exists
-    dlc_faceyaml = pt_faceyaml if os.path.exists(pt_faceyaml) else tf_faceyaml
-    dlc_bodyyaml = pt_bodyyaml if os.path.exists(pt_bodyyaml) else tf_bodyyaml
+    dlc_faceyaml = os.path.join(models_dir, facemodel_name, 'pytorch_config.yaml')
+    dlc_bodyyaml = os.path.join(models_dir, bodymodel_name, 'pytorch_config.yaml')
+
     print(f"[download_models] → using facecfg = {dlc_faceyaml}")
     print(f"[download_models] → using bodycfg = {dlc_bodyyaml}")
     return dlc_faceyaml, dlc_bodyyaml
@@ -67,30 +60,8 @@ def apply_dgp(dlc_yaml, dir_out, vid_file, vid_output):
                             save_str=os.path.basename(dlc_yaml),
                             new_size=None)
         print("DGP labels saved in ", dir_out)
-    
-def apply_dlc(filetype, vid_output, dlc_yaml, dir_out, vid_file, overwrite):
-    import deeplabcut
 
-    if overwrite:  # if overwrite desired, identify and delete previously processed marker and video files
-        analysisfiles = glob.glob(os.path.join(dir_out, os.path.splitext(os.path.basename(vid_file))[0] + '*'))
-        if analysisfiles:
-            [os.remove(f) for f in analysisfiles]
-
-    deeplabcut.analyze_videos(config=dlc_yaml, videos=[vid_file], shuffle=1, videotype=filetype, destfolder=dir_out)
-    print("DLC labels saved in ", dir_out)
-
-    if vid_output and not glob.glob(dir_out + '/' + os.path.basename(vid_file)[:-4] + '*labeled.mp4'):
-        print("Generating DLC labeled video...")
-        deeplabcut.create_labeled_video(
-            config=dlc_yaml, 
-            videos=[vid_file], 
-            draw_skeleton=False,
-            destfolder=dir_out, 
-            Frames2plot=np.arange(vid_output) if vid_output > 1 else None
-        )
-    print("DLC labeled video saved in ", dir_out)
-
-# adding PyTorch DLC 3 model
+# PyTorch DLC 3 model
 def apply_dlc_pt(filetype, vid_output, dlc_yaml, dir_out, vid_file, overwrite, device=None):
     """
     Run DLC 3 (PyTorch) inference and optionally create a labeled video.

@@ -1,1 +1,2 @@
-from .mouseflow import runDLC, runMF
+from .mouseflow import runMF
+from .dlc import runDLC
