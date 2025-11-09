@@ -97,6 +97,8 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
 
     # compute scaling if sizes provided
     H, W = firstframe.shape
+    if base_resolution is None:
+        base_resolution = (H, W)
     w0, h0 = base_resolution
     scale_x = W / w0
     scale_y = H / h0
@@ -144,13 +146,13 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
         c = np.linalg.norm(nose_pt  - mouth_pt)
         s = 0.5*(a+b+c)
         whisker_r = math.sqrt(s*(s-a)*(s-b)*(s-c)) / s
-        axes = get_axes('whiskers') or (whisker_r, whisker_r)
+        axes = get_axes('whiskers') or (whisker_r * 1.1, whisker_r * 1.1)
         mask_whiskers = create_mask(centre_whiskers, axes, angle=0)
     # nose inference
     if nose_pt is None:
         mask_nose = canvas.copy()
     else:
-        centre_nose = tuple((nose_pt + np.array([0.05*nose_pt[0], -0.1*nose_pt[1]])).round().astype(int))
+        centre_nose = tuple((nose_pt + np.array([0.05 * nose_pt[0], -0.03 * nose_pt[1]])).round().astype(int))
         axes = get_axes('nose') or (whisker_r*2/3, whisker_r*1/2)
         mask_nose = create_mask(centre_nose, axes, angle=-60.0)
     # mouth inference ellipse
@@ -160,7 +162,7 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
         centre_mouth = tuple(np.round(mouth_pt + (chin_pt - mouth_pt)/3).astype(int))
         angle_mouth = math.degrees(math.atan2(chin_pt[1]  - mouth_pt[1], chin_pt[0]  - mouth_pt[0]))
         dist = np.hypot(chin_pt[0]  - mouth_pt[0], chin_pt[1]  - mouth_pt[1])
-        axes = get_axes('mouth') or (dist, dist/4)
+        axes = get_axes('mouth') or (dist / 1.75, dist / 4)
         mask_mouth = create_mask(centre_mouth, axes, angle_mouth)
     # cheek inference ellipse
     if chin_pt is None or eyelid_pt is None:
@@ -168,7 +170,7 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
     else:
         centre_cheek = tuple(np.round(eyelid_pt + (chin_pt - eyelid_pt)/2).astype(int))
         dist = np.linalg.norm(chin_pt - eyelid_pt) 
-        axes = get_axes('cheek') or ((2/3)*dist, (1/3)*dist)
+        axes = get_axes('cheek') or ((2.5/5)*dist, (1/4)*dist)
         mask_cheek = create_mask(centre_cheek, axes, angle=0)
     masks = [mask_nose, mask_whiskers, mask_mouth, mask_cheek]
     if dlc_file:
