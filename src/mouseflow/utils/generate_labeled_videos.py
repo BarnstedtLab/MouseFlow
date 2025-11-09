@@ -17,7 +17,6 @@ import h5py
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
-from scipy import optimize, signal
 from scipy.stats.mstats import zscore
 from tqdm import tqdm
 
