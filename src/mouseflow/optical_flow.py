@@ -1,5 +1,5 @@
 '''
-Author: Jakob Faust (j.faust@eni-g.de)
+Author: @Jakob Faust
 Date: 23.10.2025
 
 Optical Flow class that abstracts
@@ -7,6 +7,7 @@ Optical Flow class that abstracts
     2) Pytorch Optical Flow based on the RAFT (https://docs.pytorch.org/vision/0.12/auto_examples/plot_optical_flow.html) model
 
 Both implementations share the same BaseOF interface to allow seamless switching between Farneback and Pytorch based approaches.
+The interface also provides an easy way for integrating other optical flow algorithms into the package. 
 Both implementations are optimized to run on a Nvidia GPU with cuda support with optimized host-device data transfer:
 We have two seperate GPU streams communicating via events.
 
@@ -68,6 +69,9 @@ class RaftOF(BaseOF):
         self.dev_buffers = None
     
     def _load_model(self):
+        '''
+        Loads RAFT model weights into (CPU / GPU) RAM
+        '''
         try:
             from torchvision.models.optical_flow import raft_small, Raft_Small_Weights
             model = raft_small(weights=Raft_Small_Weights.DEFAULT).to(self.device, dtype=torch.float16).eval()
@@ -77,9 +81,12 @@ class RaftOF(BaseOF):
         
     @staticmethod
     def _to_pinned(bgr_np: np.ndarray) -> torch.Tensor:
-        # BGR uint8 HWC (OpenCV) -> RGB float32 [1,3,H,W] in pinned host
-        x = torch.from_numpy(bgr_np[:, :, ::-1].copy())  # HWC RGB uint8
-        x = x.permute(2,0,1).unsqueeze(0).contiguous()   # [1,3,H,W]
+        '''
+        BGR uint8 HWC (OpenCV) -> RGB float32 [1,3,H,W] in pinned memory
+        (Fast memory access by pre allocating conitgous memory blocks in CPU RAM)
+        '''
+        x = torch.from_numpy(bgr_np[:, :, ::-1].copy())  # HWC --> RGB uint8
+        x = x.permute(2,0,1).unsqueeze(0).contiguous()   # [1,3,H,W] (Because Pytorch RAFT expects format of (Batches, Channels, Height, Width))
         if torch.cuda.is_available():
             return x.pin_memory()
         return x
@@ -90,15 +97,25 @@ class RaftOF(BaseOF):
         return 0.299*x[:,0] + 0.587*x[:,1] + 0.114*x[:,2]
     
     def set_masks(self, masks: list[np.ndarray]):
+        '''
+        Uploads fixed ROI masks (before applying them to the Optical Flow output) to the GPU
+        '''
         mask_tensors = [torch.from_numpy(m).to(self.device, dtype=torch.float32) for m in masks] # shape [1, K, H, W]
         self.maks_gpu = torch.stack(mask_tensors)[:, None, :, :]
         self.px_per_mask = self.maks_gpu.sum(dim=(2, 3))[:, 0].clamp_min(1)
-        print(f"Masks are uploaded to {self.device}")
+        print(f"Masks are stored on the {self.device} during further processing")
     
     def video_info(self):
+        '''
+        Just returns basic video info (#frames, fps, height, width)
+        '''
         return self.nframes, self.fps, self.height, self.width
 
     def open(self, video_path: str, start=0, end=None):
+        '''
+        Opens a video file and uploads the first two frames to the GPU
+        Blocks until the upload is finished
+        '''
         self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
             raise RuntimeError(f'cannot open video {video_path}')
@@ -134,6 +151,13 @@ class RaftOF(BaseOF):
     
     @torch.no_grad()
     def run(self):
+        '''
+        Runs optical flow and returns a dict of:
+
+        'diff' : mean pixel-wise difference (motion energy) for each ROI (in px / pframe)
+        'mag' : mean pixel magnitude
+        'ang'
+        '''
         mags, angs, diffs = [], [], []
         frame_idx = self.start + 1  # we have frame0, frame1 prepared
         cur, prev = 1, 0       # buffer indices
@@ -247,6 +271,9 @@ class FarnebackOF(BaseOF):
         super().__init__()
     
     def set_masks(self, masks: list[np.ndarray]):
+        '''
+        Uploads fixed ROI masks (before applying them to the Optical Flow output) to the GPU
+        '''
         self.masks_np = [m.astype('f4') for m in masks]
         self.px_per_mask = np.array([m.sum() for m in masks], dtype='f4')
         for m in self.masks_np:
@@ -257,9 +284,16 @@ class FarnebackOF(BaseOF):
         print("Masks are uploaded to GPU")
     
     def video_info(self):
+        '''
+        Just returns basic video info (#frames, fps, height, width)
+        '''
         return self.nframes, self.fps, self.height, self.width
 
     def open(self, video_path: str, start=0, end=None):
+        '''
+        Opens a video file and uploads the first two frames to the GPU
+        Blocks until the upload is finished
+        '''
         self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
             raise RuntimeError(f'cannot open video {video_path}')
@@ -412,7 +446,7 @@ def facemotion(videopath, masks, backend: BaseOF, start=0, end=None):
     backend.set_masks(masks)
     backend.open(videopath, start=start, end=end)
     start = time.time()
-    out = backend.run()  # dict of CPU arrays
+    out = backend.run()  # returns dict of CPU arrays
     end = time.time()
     nframes, fps, height, width = backend.video_info()
     print(f"processing took {end - start} seconds, frames_processed: {nframes}, normalized: {nframes / (end - start)}, resolution: {width} x {height}, fps: {fps}")
@@ -421,17 +455,4 @@ def facemotion(videopath, masks, backend: BaseOF, start=0, end=None):
             'OFmag_Nose','OFmag_Whiskerpad','OFmag_Mouth','OFmag_Cheek',
             'OFang_Nose','OFang_Whiskerpad','OFang_Mouth','OFang_Cheek']
     return pd.DataFrame(motion, columns=cols)
-
-if __name__ == '__main__':
-    # masks = load_masks('/user/faust24/u19926/Documents/video_data/benchmark_runtime/masks_musall_low.npz')
-    masks = load_masks('/user/faust24/u19926/Documents/masks.npz')
-    print(masks.shape)
-    video_file = "/user/faust24/u19926/Documents/video_data/sniffing/Basler_acA2000-165umNIR__23019690__20230906_121837605_90fps.mp4"
-    # video_file  = "/user/faust24/u19926/Documents/video_data/benchmark_runtime/2202_cam1_20211213_high_1280x1024_90fps.mp4"
-
-    of = FarnebackOF(n_iters=4)
-    df = facemotion(video_file, masks, of)
-    df.to_csv("/user/faust24/u19926/Documents/test_farneback.csv", index=False)
-    print(df)
-
 
