@@ -132,6 +132,11 @@ class MouseFlow:
         return float(fps), width, height, cap
 
     def _analysis_files(self):
+        '''
+        Returns face and body files hich can be found in dlc_dir and should be analysed.
+        The face files must match the pattern '*DLC*MouseFace*.h5'.
+        The body files must match the pattern '*DLC*MouseBody*.h5'.
+        '''
         if self.dlc_dir is None:
             raise RuntimeError("No DLC directory defined.")
         d = Path(self.dlc_dir)
@@ -149,6 +154,14 @@ class MouseFlow:
         return {'face_files': face_files, 'body_files': body_files}
     
     def _has_gpu_support(self):
+        '''
+        Tests if the installation has proper GPU support (and if a GPU is actually available).
+        First check: OpenCV with CUDA support (needs to be compiled on machine!!)
+        Second check: PyTorch with CUDA support
+        
+        if 'Farneback' is specified as of_backend and there is no opencv CUDA installation,
+        this will still return False even if it runs on a GPU system!!
+        '''
         import torch
         has_cv2_cuda = hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
         has_pytorch_gpu = torch.cuda.is_available()
@@ -208,7 +221,7 @@ class MouseFlow:
                 video_file, face_masks)
             face_raw = pd.concat([pupil_raw, eyelid_dist_raw, face_motion], axis=1)
         else:
-            face_motion = face_processing.facemotion(video_file, face_masks, backend=self.cfg.of_backend)
+            face_motion = face_processing.facemotion(video_file, face_masks, backend=self.cfg.of_backend) # switch between RAFT and Farneback is handled internally
             whisk_freq = motion_processing.freq_analysis2(
                 face_motion['OFang_Whiskerpad'], fps, rollwin=fps, min_periods=int(fps*.67))
             sniff_freq = motion_processing.freq_analysis2(
