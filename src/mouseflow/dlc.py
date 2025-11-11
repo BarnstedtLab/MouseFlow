@@ -7,7 +7,9 @@ from mouseflow.apply_models import LPDetector, DLCDetector, download_models
 
 def runDLC(
     vid_dir=os.getcwd(),
-    face_cfg=[], face_weights=None,
+    face_cfg=[],
+    models_dir=None,
+    face_weights=None,
     body_cfg=None, body_weights=None,
     face_model='DLC', body_model='DLC',     # 'DLC' for *.pt, 'LP' for *.ckpt
     facekey='face', bodykey='body',
@@ -24,7 +26,9 @@ def runDLC(
 
     #  To evade cuDNN error message:
     device = config_pytorch(benchmark=True, deterministic=False)
-    model_paths = download_models(os.path.join(os.getcwd(), "mf_models"))
+    if models_dir is None:
+        models_dir = os.path.join(os.getcwd(), "mf_models")
+    model_paths = download_models(models_dir)
     
     if body_cfg is None or body_weights is None:
         if body_model == 'DLC':
