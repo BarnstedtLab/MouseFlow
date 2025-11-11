@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 import os
 import numpy as np
-import gdown
 import yaml
 from contextlib import nullcontext
 import torch
@@ -19,10 +18,13 @@ def download_models(models_dir):
     models_dir = Path(models_dir)
     download_file = str(models_dir) + ".zip"
     if not models_dir.exists():
+        print("downloading models...")
         oc = owncloud.Client.from_public_link("https://owncloud.gwdg.de/index.php/s/mmabZJAw9yTKcvG",folder_password="")
         oc.get_file("/mf_models.zip", download_file)
         with zipfile.ZipFile(download_file) as mf_models:
-            mf_models.extractall(str(models_dir.parent))
+            print(f"unzipping to {str(models_dir)}...")
+            mf_models.extractall(str(models_dir))
+        print("...done")
     
     # PyTorch config (DLC 3)
     cfg_body_dlc = models_dir / "body/dlc" / "project_config.yaml"
