@@ -17,7 +17,6 @@ import h5py
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
-from scipy import optimize, signal
 from scipy.stats.mstats import zscore
 from tqdm import tqdm
 
@@ -123,11 +122,17 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
     elif processing_stage == 'zscore':
         # already z-scored → just smooth for display
         data = face.loc[:, idx['zscore', cols_to_plot]]
-        face_data = data.rolling(smooth_data, center=True, min_periods=1).mean()
+        cols_to_smooth = ['OFmag_Mouth', 'OFmag_Cheek']
+        cols_to_smooth_full = [('zscore', c) for c in cols_to_smooth]
+        cols_unsmoothed_full = [col for col in data.columns if col not in cols_to_smooth_full]
+        smoothed = data[cols_to_smooth_full].rolling(smooth_data, center=True, min_periods=1).mean()
+        unsmoothed = data[cols_unsmoothed_full]
+        face_data     = pd.concat([smoothed, unsmoothed], axis=1)[data.columns]
     else:
         raise ValueError(f"Unknown stage {processing_stage}")
-    mins = face_data.quantile(0.01) - np.arange(face_data.shape[1])
-    maxs = face_data.quantile(0.99) - np.arange(face_data.shape[1])
+    trace_spacing = 3
+    mins = face_data.quantile(0.01) - np.arange(face_data.shape[1]) * trace_spacing
+    maxs = face_data.quantile(0.99) - np.arange(face_data.shape[1]) * trace_spacing
     minvalue, maxvalue = mins.min(), maxs.max()
     cmap = plt.get_cmap('Dark2')
 
@@ -164,10 +169,10 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
             axd['bottom'].set_xticks(frame_ticks)
             axd['bottom'].set_xticklabels([f"{s:.0f}" for s in sec_ticks])      
             # y-axis setup
-            pad = (maxvalue - minvalue) * 0.3           # 30 % head/foot-value
+            pad = (maxvalue - minvalue) * 0.15           # 30 % head/foot-value
             axd['bottom'].set_ylim(minvalue - pad, maxvalue + pad)
-            axd['bottom'].set_yticks(-np.arange(len(cols_to_plot)))
-            axd['bottom'].set_yticklabels(cols_to_plot, fontsize=12, fontweight='bold')
+            axd['bottom'].set_yticks(-np.arange(len(cols_to_plot)) * trace_spacing)
+            axd['bottom'].set_yticklabels(cols_to_plot, fontsize=15, fontweight='bold')
             # data plotting
             start = max(index - midpoint, face_data.index.min()) # take the first valid frame
             end = min(index + midpoint, face_data.index.max())
@@ -183,9 +188,9 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
                     columns=window.columns)
             # plot each trace
             for i, col in enumerate(cols_to_plot):
-                axd['bottom'].axhline(-i, linestyle='--',
+                axd['bottom'].axhline(-i * trace_spacing, linestyle='--',
                                     color=cmap(i), alpha=0.5, linewidth=1.2)
-                axd['bottom'].plot(window.values[:, i] - i, color=cmap(i))
+                axd['bottom'].plot(window.values[:, i] - i * trace_spacing, color=cmap(i))
             axd['bottom'].axvline(midpoint, color='white' if use_dark_background else 'black')
             axd['bottom'].set_xlabel('Time [sec]')
 
@@ -299,11 +304,11 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
                 axd['upper right'].add_patch(circle)
 
             plt.tight_layout()
-            plt.savefig(os.path.join(resultsdir, "file%06d.png" % index))
+            plt.savefig(os.path.join(resultsdir, f"file_{index:06d}.png"))
 
             pbar.update(1)
             index += 1
-            if index > vidlength:
+            if index >= lastframe:
                 break
             previous_frame = current_frame # update to the frame just finished processing, so at the start of the next iteration it truly holds the previous frame
             ret, current_frame = facemp4.read()
@@ -313,7 +318,7 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
     if make_video:
         frames = sorted(glob.glob(os.path.join(resultsdir, 'file_*.png')))
         if not frames:
-            raise RuntimeError("No frames found in %r" % resultsdir)
+            raise RuntimeError(f"No frames found in {resultsdir}. Ensure the save pattern matches the glob.")
         vid_dirout = os.path.join(resultsdir, 'labeled_face_video.mp4')
         first = cv2.imread(frames[0])
         h, w = first.shape[:2]

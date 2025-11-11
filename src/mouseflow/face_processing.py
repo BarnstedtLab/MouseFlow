@@ -18,6 +18,7 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 
 from mouseflow.utils.generic import smooth
+from mouseflow.optical_flow import FarnebackOF, RaftOF, BaseOF
 
 plt.interactive(False)
 
@@ -96,6 +97,8 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
 
     # compute scaling if sizes provided
     H, W = firstframe.shape
+    if base_resolution is None:
+        base_resolution = (H, W)
     w0, h0 = base_resolution
     scale_x = W / w0
     scale_y = H / h0
@@ -143,13 +146,13 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
         c = np.linalg.norm(nose_pt  - mouth_pt)
         s = 0.5*(a+b+c)
         whisker_r = math.sqrt(s*(s-a)*(s-b)*(s-c)) / s
-        axes = get_axes('whiskers') or (whisker_r, whisker_r)
+        axes = get_axes('whiskers') or (whisker_r * 1.1, whisker_r * 1.1)
         mask_whiskers = create_mask(centre_whiskers, axes, angle=0)
     # nose inference
     if nose_pt is None:
         mask_nose = canvas.copy()
     else:
-        centre_nose = tuple((nose_pt + np.array([0.05*nose_pt[0], -0.1*nose_pt[1]])).round().astype(int))
+        centre_nose = tuple((nose_pt + np.array([0.05 * nose_pt[0], -0.03 * nose_pt[1]])).round().astype(int))
         axes = get_axes('nose') or (whisker_r*2/3, whisker_r*1/2)
         mask_nose = create_mask(centre_nose, axes, angle=-60.0)
     # mouth inference ellipse
@@ -159,7 +162,7 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
         centre_mouth = tuple(np.round(mouth_pt + (chin_pt - mouth_pt)/3).astype(int))
         angle_mouth = math.degrees(math.atan2(chin_pt[1]  - mouth_pt[1], chin_pt[0]  - mouth_pt[0]))
         dist = np.hypot(chin_pt[0]  - mouth_pt[0], chin_pt[1]  - mouth_pt[1])
-        axes = get_axes('mouth') or (dist, dist/4)
+        axes = get_axes('mouth') or (dist / 1.75, dist / 4)
         mask_mouth = create_mask(centre_mouth, axes, angle_mouth)
     # cheek inference ellipse
     if chin_pt is None or eyelid_pt is None:
@@ -167,7 +170,7 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
     else:
         centre_cheek = tuple(np.round(eyelid_pt + (chin_pt - eyelid_pt)/2).astype(int))
         dist = np.linalg.norm(chin_pt - eyelid_pt) 
-        axes = get_axes('cheek') or ((2/3)*dist, (1/3)*dist)
+        axes = get_axes('cheek') or ((2.5/5)*dist, (1/4)*dist)
         mask_cheek = create_mask(centre_cheek, axes, angle=0)
     masks = [mask_nose, mask_whiskers, mask_mouth, mask_cheek]
     if dlc_file:
@@ -177,80 +180,26 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
 
     return masks, face_anchor
 
-
-# Calculating optical flow and motion energy
-def facemotion(videopath, masks, videoslice=[]):
-    print(f"Calculating optical flow and motion energy for video {videopath}...")
-    facemp4 = cv2.VideoCapture(videopath)
-    if videoslice:
-        print("Processing slice from {} to {}...".format(
-            videoslice[0], videoslice[-1]))
-        facemp4.set(1, videoslice[0])
-        framelength = videoslice[1]-videoslice[0]
+def facemotion(videopath, masks, backend : str, videoslice=[]):
+    gpu_flow : BaseOF = None
+    if backend == 'RAFT':
+        gpu_flow = RaftOF()
+    elif backend == 'Farneback':
+        gpu_flow = FarnebackOF()
     else:
-        framelength = int(facemp4.get(7))
-    _, current_frame = facemp4.read()
-    previous_frame = current_frame
-    gpu_masks = []
-    maskpx = []
-    masks = [m.astype('float32') for m in masks]
-    for m in range(len(masks)):
-        gpu_mask = cv2.cuda_GpuMat()
-        gpu_mask.upload(masks[m])
-        gpu_masks.append(gpu_mask)
-        masks[m][masks[m] == 0] = np.nan
-        maskpx.append(np.nansum(masks[m]))
-
-    frame_diff = np.empty((framelength, 4))
-    frame_diffmag = np.empty((framelength, 4))
-    frame_diffang = np.empty((framelength, 4))
-    gpu_flow = cv2.cuda_FarnebackOpticalFlow.create(numLevels=5, pyrScale=.5, fastPyramids=True, winSize=25,
-                                                    numIters=3, polyN=5, polySigma=1.2, flags=0)
-
-    i = 0
-    with tqdm(total=framelength) as pbar:
-        while facemp4.isOpened():
-            current_frame_gray = cv2.cvtColor(
-                current_frame, cv2.COLOR_BGR2GRAY)
-            gpu_frame = cv2.cuda_GpuMat()
-            gpu_frame.upload(current_frame_gray)
-
-            previous_frame_gray = cv2.cvtColor(
-                previous_frame, cv2.COLOR_BGR2GRAY)
-            gpu_previous = cv2.cuda_GpuMat()
-            gpu_previous.upload(previous_frame_gray)
-            flow = gpu_flow.calc(gpu_frame, gpu_previous, None)
-            gpu_flow_x = cv2.cuda_GpuMat(flow.size(), cv2.CV_32FC1)
-            gpu_flow_y = cv2.cuda_GpuMat(flow.size(), cv2.CV_32FC1)
-            cv2.cuda.split(flow, [gpu_flow_x, gpu_flow_y])
-            gpu_mag, gpu_ang = cv2.cuda.cartToPolar(
-                gpu_flow_x, gpu_flow_y, angleInDegrees=True)
-            gpu_frame32 = gpu_frame.convertTo(cv2.CV_32FC1, gpu_frame)
-            gpu_previous32 = gpu_previous.convertTo(
-                cv2.CV_32FC1, gpu_previous)
-            for index, (mask, gpu_mask, px) in enumerate(zip(masks, gpu_masks, maskpx)):
-                mag_mask = cv2.cuda.multiply(gpu_mag, gpu_mask)
-                ang_mask = cv2.cuda.multiply(gpu_ang, gpu_mask)
-                frame_mask = cv2.cuda.multiply(gpu_frame32, gpu_mask)
-                previous_mask = cv2.cuda.multiply(gpu_previous32, gpu_mask)
-                frame_diffmag[i, index] = cv2.cuda.absSum(mag_mask)[0] / px
-                frame_diffang[i, index] = cv2.cuda.absSum(ang_mask)[0] / px
-                frame_diff[i, index] = cv2.cuda.absSum(
-                    cv2.cuda.absdiff(frame_mask, previous_mask))[0] / px
-            pbar.update(1)
-            i += 1
-            previous_frame = current_frame.copy()
-            _, current_frame = facemp4.read()
-            if current_frame is None or (videoslice and len(frame_diff) > len(videoslice)-1):
-                break
-    facemp4.release()
-
-    motion = pd.DataFrame(np.hstack([frame_diff, frame_diffmag, frame_diffang]),
-                            columns=['MotionEnergy_Nose', 'MotionEnergy_Whiskerpad', 'MotionEnergy_Mouth', 'MotionEnergy_Cheek',
-                                    'OFmag_Nose', 'OFmag_Whiskerpad', 'OFmag_Mouth', 'OFmag_Cheek',
-                                    'OFang_Nose', 'OFang_Whiskerpad', 'OFang_Mouth', 'OFang_Cheek'])
-    return motion
-
+        raise RuntimeError(f"Unexpected flow type {backend}, expected 'RAFT' or 'Farneback'.")
+    if videoslice:
+        start, end = videoslice[0], videoslice[1]
+    else:
+        start, end = 0, None
+    gpu_flow.set_masks(masks) # upload ROI masks to gpu
+    gpu_flow.open(videopath, start=start, end=end) # opens video
+    out = gpu_flow.run()  # dict of CPU arrays containing below arrays
+    motion = np.hstack([out['diff'], out['mag'], out['ang']])
+    cols = ['MotionEnergy_Nose','MotionEnergy_Whiskerpad','MotionEnergy_Mouth','MotionEnergy_Cheek',
+            'OFmag_Nose','OFmag_Whiskerpad','OFmag_Mouth','OFmag_Cheek',
+            'OFang_Nose','OFang_Whiskerpad','OFang_Mouth','OFang_Cheek']
+    return pd.DataFrame(motion, columns=cols)
 
 # Calculating motion energy
 def facemotion_nocuda(videopath, masks, videoslice=[]):

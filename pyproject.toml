@@ -2,11 +2,12 @@
 name = "MouseFlow"
 version = "0.0.1"
 authors = [
-  { name="Oliver Barnstedt", email="o.barnstedt@gmail.com" },
+  { name="Oliver Barnstedt", email="o.barnstedt@eni-g.de" },
+  { name="Lam Bui", email="l.bui@eni-g.de" },
 ]
 description = "A Python toolbox to quantify facial and bodily movement in headfixed mice."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -18,8 +19,7 @@ dependencies = [
   'h5py',
   'tqdm',
   'scipy',
-  'flow-vis',
-  'gdown',
+  'flow-vis'
 ]
 
 [project.urls]
