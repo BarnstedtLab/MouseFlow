@@ -2,7 +2,8 @@
 name = "MouseFlow"
 version = "0.0.1"
 authors = [
-  { name="Oliver Barnstedt", email="o.barnstedt@eni-g.de", name="Lam Bui", email="l.bui@eni-g.de" },
+  { name="Oliver Barnstedt", email="o.barnstedt@eni-g.de" },
+  { name="Lam Bui", email="l.bui@eni-g.de" },
 ]
 description = "A Python toolbox to quantify facial and bodily movement in headfixed mice."
 readme = "README.md"

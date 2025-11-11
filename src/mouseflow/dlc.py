@@ -2,7 +2,7 @@ import os
 import glob
 from mouseflow.utils.preprocess_video import flip_vid, crop_vid
 from mouseflow.utils.pytorch_utils import config_pytorch
-from mouseflow.apply_models import LPDetector, DLCDetector
+from mouseflow.apply_models import LPDetector, DLCDetector, download_models
 
 
 def runDLC(
@@ -24,12 +24,24 @@ def runDLC(
 
     #  To evade cuDNN error message:
     device = config_pytorch(benchmark=True, deterministic=False)
-
-    # check where marker models are located, download if not present
-    # dlc_faceyaml, dlc_bodyyaml = apply_models.download_models(
-    #     models_dir, facemodel_name, bodymodel_name)
-    # face_engine = apply_models.detect_engine(dlc_faceyaml)
-    # body_engine = apply_models.detect_engine(dlc_bodyyaml)
+    model_paths = download_models(os.path.join(os.getcwd(), "mf_models"))
+    
+    if body_cfg is None or body_weights is None:
+        if body_model == 'DLC':
+            body_cfg = str(model_paths['cfg_body_dlc'])
+            body_weights = str(model_paths['model_body_dlc'])
+        elif body_model =="LP":
+            body_cfg = str(model_paths['cfg_body_lp'])
+            body_weights = str(model_paths['model_body_lp']) 
+        else:
+            raise ValueError("please use either LP or DLC for 'body_model'")
+        
+    if face_cfg is None or face_weights is None:
+        if face_model == 'DLC':
+            face_cfg = str(model_paths['cfg_face_dlc'])
+            face_weights = str(model_paths['model_face_dlc'])
+        else:
+            raise ValueError("please use either LP or DLC for 'face_model'")
 
     # identify video files
     facefiles = []
@@ -101,9 +113,7 @@ def runDLC(
 
     # FACE
     if face_cfg and face_weights:
-        print('facecfg and faceweights ok')
         for facefile in facefiles:
-            print(f"file found: {facefile}")
             out_exists = glob.glob(os.path.join(dir_out, os.path.basename(facefile)[:-4] + '*.h5'))
             if out_exists and not overwrite:
                 print(f'Skipping {os.path.basename(facefile)} (already labelled).')
@@ -112,14 +122,12 @@ def runDLC(
             if face_model == 'LP':
                 det = LPDetector(face_cfg, face_weights)
             else:  # 'DLC'
-                det = DLCDetector(face_cfg, face_weights, shuffle=1)
+                det = DLCDetector(face_cfg, face_weights, shuffle=2)
             det.detect_keypoints(facefile, dir_out, vid_output, overwrite)
 
     # BODY
     if body_cfg and body_weights:
-        print('body and body ok')
         for bodyfile in bodyfiles:
-            print(f"file found: {bodyfile}")
             out_exists = glob.glob(os.path.join(dir_out, os.path.basename(bodyfile)[:-4] + '*.h5'))
             if out_exists and not overwrite:
                 print(f'Skipping {os.path.basename(bodyfile)} (already labelled).')
@@ -130,46 +138,3 @@ def runDLC(
             else:
                 det = DLCDetector(body_cfg, body_weights, shuffle=3)
             det.detect_keypoints(bodyfile, dir_out, vid_output, overwrite)
-
-    # Apply DLC/DGP Model to each face video
-    # for facefile in facefiles:
-    #     print(f">>> PROCESSING FACE (engine: {face_engine})  file: {os.path.basename(facefile)}")
-    #     if glob.glob(os.path.join(dir_out, os.path.basename(facefile)[:-4]+'*.h5')) and not overwrite:
-    #         print(
-    #             f'Video {os.path.basename(facefile)} already labelled. Skipping ahead...')
-    #     else:
-    #         print("Applying ", dlc_faceyaml, " on FACE video: ", facefile)
-    #         # if face_engine == 'pytorch':        # DLC3
-    #         #     apply_models.apply_dlc_pt(      
-    #         #         filetype, vid_output, dlc_faceyaml, dir_out,
-    #         #         facefile, overwrite, device=device)
-            
-    #         if face_model == 'LP':        # DLC3
-    #             lpdetector = LPDetector(dlc_faceyaml, dlc_faceyaml) #TODO!!!
-    #             lpdetector.detect_keypoints(facefile, dir_out, vid_output, overwrite)
-    #         elif face_model == 'DLC':        # DLC3
-    #             dlcdetector = DLCDetector(dlc_faceyaml, dlc_faceyaml) #TODO!!!
-    #             dlcdetector.detect_keypoints(facefile, dir_out, vid_output, overwrite)
-    #         else:
-    #             raise RuntimeError("Make sure pytorch is installed on your system to run DLC.")
-
-    # # Apply DLC/DGP Model to each body video
-    # for bodyfile in bodyfiles:
-    #     print(f">>> PROCESSING BODY (engine: {body_engine})  file: {os.path.basename(bodyfile)}")
-    #     if glob.glob(os.path.join(dir_out, os.path.basename(bodyfile)[:-4]+'*.h5')) and not overwrite:
-    #         print(
-    #             f'Video {os.path.basename(bodyfile)} already labelled. Skipping ahead...')
-    #     else:
-    #         print("Applying ", dlc_bodyyaml, " on BODY video: ", bodyfile)
-    #         # if body_engine == 'pytorch':        # DLC3
-    #         #     apply_models.apply_dlc_pt(      
-    #         #         filetype, vid_output, dlc_bodyyaml, dir_out,
-    #         #         bodyfile, overwrite, device=device)
-    #         if body_model == 'LP':        # DLC3
-    #             lpdetector = LPDetector(dlc_bodyyaml, dlc_bodyyaml) #TODO!!!
-    #             lpdetector.detect_keypoints(bodyfile, dir_out, vid_output, overwrite)
-    #         elif body_model == 'DLC':        # DLC3
-    #             dlcdetector = DLCDetector(dlc_bodyyaml, dlc_bodyyaml) #TODO!!!
-    #             dlcdetector.detect_keypoints(bodyfile, dir_out, vid_output, overwrite)
-    #         else:
-    #             raise RuntimeError("Make sure pytorch is installed on your system to run DLC.")

@@ -13,22 +13,28 @@ import pandas as pd
 from ruamel.yaml import YAML
 
 
-def download_models(models_dir, facemodel_name, bodymodel_name):   
-    if not os.path.exists(os.path.join(models_dir, facemodel_name)):
-        dlc_face_url = 'https://drive.google.com/drive/folders/1_XPPyzaxMjQ901vJCwtv1g_h5DYWHM8j?usp=sharing'
-        gdown.download_folder(dlc_face_url, models_dir, quiet=True, use_cookies=False)
-
-    if not os.path.exists(os.path.join(models_dir, bodymodel_name)):
-        dlc_body_url = 'https://drive.google.com/drive/folders/1_XPPyzaxMjQ901vJCwtv1g_h5DYWHM8j?usp=sharing'
-        gdown.download_folder(dlc_body_url, models_dir, quiet=True, use_cookies=False)
+def download_models(models_dir):
+    import owncloud
+    import zipfile
+    models_dir = Path(models_dir)
+    download_file = str(models_dir) + ".zip"
+    if not models_dir.exists():
+        oc = owncloud.Client.from_public_link("https://owncloud.gwdg.de/index.php/s/mmabZJAw9yTKcvG",folder_password="")
+        oc.get_file("/mf_models.zip", download_file)
+        with zipfile.ZipFile(download_file) as mf_models:
+            mf_models.extractall(str(models_dir.parent))
     
     # PyTorch config (DLC 3)
-    dlc_faceyaml = os.path.join(models_dir, facemodel_name, 'pytorch_config.yaml')
-    dlc_bodyyaml = os.path.join(models_dir, bodymodel_name, 'pytorch_config.yaml')
-
-    print(f"[download_models] → using facecfg = {dlc_faceyaml}")
-    print(f"[download_models] → using bodycfg = {dlc_bodyyaml}")
-    return dlc_faceyaml, dlc_bodyyaml
+    cfg_body_dlc = models_dir / "body/dlc" / "project_config.yaml"
+    model_body_dlc = models_dir / "body/dlc" / "dlc-models-pytorch/iteration-1/MouseBodySep9-trainset95shuffle3/train/snapshot-best-260.pt"
+    cfg_body_lp = models_dir / "body/lp" / "config.yaml"
+    model_body_lp = models_dir / "body/lp" / "epoch=79-step=20000-best.ckpt"
+    
+    cfg_face_dlc = models_dir / "face/dlc" / "project_config.yaml"
+    model_face_dlc = models_dir / "face/dlc" / "dlc-models-pytorch/iteration-0/MouseFaceAug21-trainset95shuffle2/train/snapshot-best-170.pt"
+    
+    return dict(cfg_body_dlc=cfg_body_dlc, model_body_dlc=model_body_dlc, cfg_body_lp=cfg_body_lp, model_body_lp=model_body_lp, cfg_face_dlc=cfg_face_dlc,
+                model_face_dlc=model_face_dlc)
 
 def detect_engine(cfg_path):
     """
@@ -71,6 +77,35 @@ class LPDetector(KeypointDetector):
         cfg.model.backbone = cfg.model.get("backbone", "resnet50")
         cfg.model.pretrained = False
         return cfg
+    
+    def lp_csv_to_dlc_h5(self, csv_path, out_h5=None, scorer_name="heatmap_tracker"):
+        """
+        Convert LightningPose wide CSV (row0 bodyparts, row1 coords) to DLC-style HDF5.
+        MultiIndex level names must be exactly: ('scorer','bodyparts','coords').
+        """
+        raw = pd.read_csv(csv_path, dtype=str, low_memory=False)
+        bodyparts_row = raw.iloc[0]
+        coords_row    = raw.iloc[1]
+
+        pred_cols, keep_cols = [], []
+        for j, col in enumerate(raw.columns):
+            if col == "scorer":
+                continue
+            bp  = str(bodyparts_row.iloc[j]).strip()
+            crd = str(coords_row.iloc[j]).strip().lower()  # 'x','y','likelihood'
+            pred_cols.append((scorer_name, bp, crd))
+            keep_cols.append(col)
+
+        df = raw.iloc[2:].copy()
+        df["scorer"] = pd.to_numeric(df["scorer"], errors="coerce")
+        df = df.set_index("scorer").rename_axis("frame")
+        df = df[keep_cols].apply(pd.to_numeric, errors="coerce")
+        df.columns = pd.MultiIndex.from_tuples(pred_cols, names=["scorer","bodyparts","coords"])
+
+        if out_h5 is None:
+            out_h5 = Path(csv_path).with_suffix(".h5")
+        df.to_hdf(out_h5, key="df_with_missing", mode="w")
+        return str(out_h5)
 
     
     def detect_keypoints(self,
@@ -80,24 +115,26 @@ class LPDetector(KeypointDetector):
         overwrite: bool = False):
         from lightning_pose.utils.predictions import export_predictions_and_labeled_video
 
-        os.makedirs(out_dir, exist_ok=True)
-
+        out_path = Path(out_dir)
+        if not out_path.exists():
+            out_path.mkdir(exist_ok=True, parents=True)
         base = os.path.splitext(os.path.basename(video_file))[0]
-        preds_csv = os.path.join(out_dir, f"{base}.csv")
-        labeled_mp4 = os.path.join(out_dir, f"{base}_labeled.mp4") if make_labeled_video else None
+        preds_csv = out_path / f"{base}.csv"
+        labeled_mp4 = out_path.parent /  f"{base}_labeled.mp4" if make_labeled_video else None
 
-        if not overwrite and os.path.isfile(preds_csv):
-            return preds_csv, labeled_mp4
+        if not overwrite and preds_csv.is_file():
+            return str(preds_csv), str(labeled_mp4)
         autocast_enabled = autocast() if self.device == "cuda" else nullcontext()
         with torch.no_grad():
             with autocast_enabled:
                 export_predictions_and_labeled_video(
                     video_file=video_file,
                     cfg=self.cfg,
-                    prediction_csv_file=preds_csv,
+                    prediction_csv_file=str(preds_csv),
                     ckpt_file=self.model_path,      # uses checkpoint path
-                    labeled_mp4_file=labeled_mp4,  # None skips rendering
+                    labeled_mp4_file=str(labeled_mp4) if make_labeled_video else None,  # None skips rendering
                 )
+        self.lp_csv_to_dlc_h5(str(preds_csv))
         return preds_csv, labeled_mp4
     
 
