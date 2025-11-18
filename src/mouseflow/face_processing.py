@@ -175,8 +175,8 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
     masks = [mask_nose, mask_whiskers, mask_mouth, mask_cheek]
     if dlc_file:
         plt.imshow(firstframe, cmap='gray')
-        plt.savefig(dlc_file[:-3] + "_face_regions.png");
-    plt.close('all');
+        plt.savefig(str(dlc_file)[:-3] + "_face_regions.png")
+    plt.close('all')
 
     return masks, face_anchor
 
