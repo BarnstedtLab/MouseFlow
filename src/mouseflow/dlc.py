@@ -1,5 +1,6 @@
 import os
 import glob
+from pathlib import Path
 from mouseflow.utils.preprocess_video import flip_vid, crop_vid
 from mouseflow.utils.pytorch_utils import config_pytorch
 from mouseflow.apply_models import LPDetector, DLCDetector, download_models
@@ -118,10 +119,15 @@ def runDLC(
     # FACE
     if face_cfg and face_weights:
         for facefile in facefiles:
-            out_exists = glob.glob(os.path.join(dir_out, os.path.basename(facefile)[:-4] + '*.h5'))
+            base = Path(facefile).stem
+            pattern_h5 = str(Path(dir_out) / f"{base}*.h5")
+            pattern_csv = str(Path(dir_out) / f"{base}*.csv")
+            out_exists = glob.glob(pattern_h5) + glob.glob(pattern_csv)
+
             if out_exists and not overwrite:
-                print(f'Skipping {os.path.basename(facefile)} (already labelled).')
+                print(f"Skipping {Path(facefile).name} (already labelled: {out_exists[0]}).")
                 continue
+
             print("Applying FACE model:", face_cfg, "weights:", face_weights)
             if face_model == 'LP':
                 det = LPDetector(face_cfg, face_weights)
@@ -132,10 +138,15 @@ def runDLC(
     # BODY
     if body_cfg and body_weights:
         for bodyfile in bodyfiles:
-            out_exists = glob.glob(os.path.join(dir_out, os.path.basename(bodyfile)[:-4] + '*.h5'))
+            base = Path(bodyfile).stem
+            pattern_h5 = str(Path(dir_out) / f"{base}*.h5")
+            pattern_csv = str(Path(dir_out) / f"{base}*.csv")
+            out_exists = glob.glob(pattern_h5) + glob.glob(pattern_csv)
+
             if out_exists and not overwrite:
-                print(f'Skipping {os.path.basename(bodyfile)} (already labelled).')
+                print(f"Skipping {Path(bodyfile).name} (already labelled: {out_exists[0]}).")
                 continue
+
             print("Applying BODY model:", body_cfg, "weights:", body_weights)
             if body_model == 'LP':
                 det = LPDetector(body_cfg, body_weights)

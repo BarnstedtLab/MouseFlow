@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 from tqdm import tqdm
 
 import torch
+import torch.nn.functional as F
 
 import pandas as pd
 
@@ -149,6 +150,22 @@ class RaftOF(BaseOF):
         if self.device == 'cuda':
             torch.cuda.current_stream(self.device).wait_stream(self.copy_stream)
     
+    
+    def _pad(self, x):
+        # x: [1,3,H,W]
+        _, _, h, w = x.shape
+        pad_h = (8 - h % 8) % 8
+        pad_w = (8 - w % 8) % 8
+        if pad_h == 0 and pad_w == 0:
+            return x, (0, 0)
+        # pad = (pad_left, pad_right, pad_top, pad_bottom) for NCHW 2D padding
+        x_pad = F.pad(x, (0, pad_w, 0, pad_h), mode="replicate")
+        return x_pad, (pad_h, pad_w)
+
+    def _undo_pad(self, t, h, w):
+        # t: [B,C,H',W'] or [B,H',W']; returns [:,:h,:w]
+        return t[..., :h, :w]
+    
     @torch.no_grad()
     def run(self):
         '''
@@ -184,8 +201,14 @@ class RaftOF(BaseOF):
                 prev_frame = self.dev_buffers[prev].float() / 255.0
                 cur_frame = self.dev_buffers[cur].float() / 255.0
 
-                flow = self.model(prev_frame, cur_frame, num_flow_updates=self.niters)
+                H, W = prev_frame.shape[-2], prev_frame.shape[-1]
+                prev_frame_padded, (ph, pw) = self._pad(prev_frame)
+                cur_frame_padded,  _        = self._pad(cur_frame)
+
+                flow = self.model(prev_frame_padded, cur_frame_padded, num_flow_updates=self.niters)
                 flow = flow[0] if isinstance(flow, (list, tuple)) else flow
+                if ph or pw:
+                    flow = self._undo_pad(flow, H, W)
                 flow_x = flow[:, 0]
                 flow_y = flow[:, 1]
                 mag = torch.sqrt(flow_x * flow_x + flow_y * flow_y)

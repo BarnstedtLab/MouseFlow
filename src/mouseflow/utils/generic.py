@@ -87,13 +87,13 @@ def process_raw_data(smoothing_windows_sec, na_limit, FaceCam_FPS, interpolation
                                 for (x, k) in smoothing_windows_sec.items()}
     face_smooth = face_interp.copy()
     face_smooth['PupilDiam'] = face_smooth['PupilDiam'].rolling(
-            window=smoothing_windows_frames['PupilDiam'], center=True).mean()
+            window=smoothing_windows_frames['PupilDiam'], center=True).mean().astype('float32')
     face_smooth[['PupilX', 'PupilY', 'PupilMotion']] = \
             face_smooth[['PupilX', 'PupilY', 'PupilMotion']].rolling(
-            window=smoothing_windows_frames['PupilMotion'], center=True).mean()
+            window=smoothing_windows_frames['PupilMotion'], center=True).mean().astype('float32')
     face_smooth.loc[:, face_smooth.columns.str.startswith('MotionEnergy')] = \
             face_smooth.loc[:, face_smooth.columns.str.startswith('MotionEnergy')].rolling(
-            window=smoothing_windows_frames['MotionEnergy'], center=True).mean()
+            window=smoothing_windows_frames['MotionEnergy'], center=True).mean().astype('float32')
 
     # Z-scoring data
     face_zscore = face_smooth.apply(lambda a: (a - a.mean())/a.std(ddof=0))

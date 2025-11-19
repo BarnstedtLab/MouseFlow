@@ -14,6 +14,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 from scipy.stats.mstats import zscore
 from scipy import signal, optimize
+from mouseflow.utils.motion_processing import smooth
 
 
 plt.interactive(False)

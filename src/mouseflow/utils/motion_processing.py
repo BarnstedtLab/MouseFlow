@@ -611,7 +611,7 @@ def dlc_pointdistance2(point1, point2):
     return pd.Series(np.linalg.norm((point2 - point1), axis=1))
 
 def freq_analysis(x, f_s=75, M=128):
-    freqs, times, Sx = signal.spectrogram(x, fs=f_s, window='hanning',
+    freqs, times, Sx = signal.spectrogram(x, fs=f_s, window='hamming',
                                           nperseg=M, noverlap=M - 50,
                                           detrend=False, scaling='spectrum')
     max_freq = pd.DataFrame(data={'Time': times, 'maxf': np.argmax(Sx, axis=0)})
@@ -629,11 +629,16 @@ def freq_analysis(x, f_s=75, M=128):
     # ax[3].plot(timing, motion_frontpaw)
 
 def freq_analysis2(x, fps, rollwin=75, min_periods=50, conf=0.5):
-    if 'x' in x:
-        x.loc[x.likelihood < conf] = np.nan
-        y = x.x
-    else:
+    if isinstance(x, pd.DataFrame) and {'x', 'likelihood'}.issubset(x.columns):
+        x_filtered = x.copy()
+        x_filtered.loc[x_filtered['likelihood'] < conf, 'x'] = np.nan
+        y = x_filtered['x']
+    elif isinstance(x, pd.DataFrame) and 'x' in x.columns:
+        y = x['x']
+    elif isinstance(x, pd.Series):
         y = x
+    else:
+        raise ValueError("Input must be a pandas Series or a DataFrame containing an 'x' column (and optionally 'likelihood').")
     xinterp = y.interpolate(method='linear')
     xz = (xinterp - xinterp.min()) / (xinterp - xinterp.min()).max()
     print('Fitting sine...')
