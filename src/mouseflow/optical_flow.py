@@ -65,6 +65,9 @@ class RaftOF(BaseOF):
         self.height = 0
         self.width = 0
 
+        self.save_vectors = True
+        self.downsample_factor = 8
+
         self.copy_stream = torch.cuda.Stream(device=self.device) if self.device == "cuda" else None
         self.comp_stream = torch.cuda.Stream(device=self.device) if self.device == "cuda" else None
         self.dev_buffers = None
@@ -166,6 +169,17 @@ class RaftOF(BaseOF):
         # t: [B,C,H',W'] or [B,H',W']; returns [:,:h,:w]
         return t[..., :h, :w]
     
+    def _downsample_flowfield(self, flow_orig):
+        if self.downsample_factor <= 1:
+            return flow_orig
+        
+        downsampled_flow = F.avg_pool2d(
+            flow_orig,
+            kernel_size = self.downsample_factor,
+            stride = self.downsample_factor
+        )
+        return downsampled_flow
+    
     @torch.no_grad()
     def run(self):
         '''
@@ -175,7 +189,6 @@ class RaftOF(BaseOF):
         'mag' : mean pixel magnitude
         'ang'
         '''
-        mags, angs, diffs = [], [], []
         frame_idx = self.start + 1  # we have frame0, frame1 prepared
         cur, prev = 1, 0       # buffer indices
         max_frames = max(0, self.nframes - (self.start + 1))
@@ -186,6 +199,13 @@ class RaftOF(BaseOF):
         angs_t  = torch.empty((max_frames, n_masks), device=self.device, dtype=torch.float32)
         diffs_t = torch.empty((max_frames, n_masks), device=self.device, dtype=torch.float32)
         t = 0
+
+        # Downsampling for saving the vectorfield
+        H, W = self.height, self.width
+        h_dwnsampld = H // self.downsample_factor
+        w_dwnsampld = W // self.downsample_factor
+        downsampled_flows_t  = torch.empty((max_frames, 2, h_dwnsampld, w_dwnsampld), device=self.device, dtype=torch.float32)
+
         while True:
             ret, fn = self.cap.read()
             frame_idx += 1
@@ -209,6 +229,7 @@ class RaftOF(BaseOF):
                 flow = flow[0] if isinstance(flow, (list, tuple)) else flow
                 if ph or pw:
                     flow = self._undo_pad(flow, H, W)
+                downsampled_flow = self._downsample_flowfield(flow.float())
                 flow_x = flow[:, 0]
                 flow_y = flow[:, 1]
                 mag = torch.sqrt(flow_x * flow_x + flow_y * flow_y)
@@ -223,45 +244,25 @@ class RaftOF(BaseOF):
             
             # GPU still busy, continue CPU image reading
             pbar.update(1)
-            # ret, fn = self.cap.read()
-            # frame_idx += 1
 
             # Ensure compute finished for this iteration before collecting results
             self.comp_stream.synchronize()
             mags_t[t].copy_(mean_mag)
             angs_t[t].copy_(mean_ang)
             diffs_t[t].copy_(mean_diff)
+
+            # downsampled flows have the shape [1, 2, w, h], we need [2, w, h]. That's what squeeze does here.
+            downsampled_flows_t[t].copy_(downsampled_flow.squeeze(0))
             t+=1
-            # mags.append(mean_mag.detach().cpu().numpy())
-            # angs.append(mean_ang.detach().cpu().numpy())
-            # diffs.append(mean_diff.detach().cpu().numpy())
-
-            # if not ret or frame_idx >= self.nframes:
-            #     break
-
-            # nxt = prev  # reuse the oldest slot
-            # host_nxt = self._to_pinned(fn)
-            # with torch.cuda.stream(self.copy_stream):
-            #     self.dev_buffers[nxt].copy_(host_nxt, non_blocking=True)
-
-            # Make sure the copy of 'nxt' finishes before it becomes 'cur' next loop
-            # self.comp_stream.wait_stream(self.copy_stream)
-
-            # rotate buffers: (prev,cur) <= (cur,nxt)
-            # prev, cur = cur, nxt
 
         torch.cuda.synchronize()
         self.cap.release()
         out = dict(
             diff=diffs_t[:t].cpu().numpy().astype(np.float32),
             mag=mags_t[:t].cpu().numpy().astype(np.float32),
-            ang=angs_t[:t].cpu().numpy().astype(np.float32)
+            ang=angs_t[:t].cpu().numpy().astype(np.float32),
+            flow_grid=downsampled_flows_t[:t].float().cpu().numpy()
         )
-        # return dict(
-        #     diff=np.stack(diffs, axis=0).astype(np.float32),
-        #     mag =np.stack(mags,  axis=0).astype(np.float32),
-        #     ang =np.stack(angs,  axis=0).astype(np.float32),
-        # )
         return out
 
 
@@ -277,7 +278,6 @@ class FarnebackOF(BaseOF):
         self.masks_np = None
         self.maks_gpu = []
         self.px_per_mask = None
-        self.start_frame = 0
         self.shape = None
 
         self.nframes = 0
@@ -288,6 +288,9 @@ class FarnebackOF(BaseOF):
         self.gpu_bgr = None
         self.gpu_gray = None
         self.gpu_gray_f32 = None
+
+        self.save_vectors = True
+        self.downsample_factor = 8
 
         self.ready_evt = cv2.cuda.Event()
         
@@ -391,10 +394,21 @@ class FarnebackOF(BaseOF):
         cv2.cuda.registerPageLocked(ang_host)
         cv2.cuda.registerPageLocked(diff_host)
 
+        d_h = rows // self.downsample_factor
+        d_w = cols // self.downsample_factor
+        
+        # GPU Buffer for the current resized flow
+        flow_small = cv2.cuda_GpuMat(d_h, d_w, cv2.CV_32FC2)
+        # CPU Buffer (Pinned) for saving all frames
+        flow_grid_host = np.empty((max_frames, d_h, d_w, 2), dtype=np.float32)
+        cv2.cuda.registerPageLocked(flow_grid_host)
+
         pbar = tqdm(total=max_frames)
 
         while True:
             self.of.calc(self.gpu_gray[prev], self.gpu_gray[cur], flow, stream=self.compute_stream)
+            cv2.cuda.resize(flow, (d_w, d_h), dst=flow_small, stream=self.compute_stream)
+            flow_small.download(stream=self.copy_stream, dst=flow_grid_host[out_idx])
             cv2.cuda.split(flow, [flow_x, flow_y], stream=self.compute_stream)
             mag, ang = cv2.cuda.cartToPolar(flow_x, flow_y, angleInDegrees=False, stream=self.compute_stream)
             diff = cv2.cuda.absdiff(self.gpu_gray_f32[cur], self.gpu_gray_f32[prev], stream=self.compute_stream)
@@ -454,10 +468,12 @@ class FarnebackOF(BaseOF):
         mags  = (mag_host[:out_idx, :]  / px[None, :]).astype(np.float32)
         angs  = (ang_host[:out_idx, :]  / px[None, :]).astype(np.float32)
         diffs = (diff_host[:out_idx, :] / px[None, :]).astype(np.float32)
+        flow_grid = flow_grid_host[:out_idx].transpose(0, 3, 1, 2)
         return dict(
             diff=np.array(diffs, dtype=np.float32),
             mag =np.array(mags,  dtype=np.float32),
             ang =np.array(angs,  dtype=np.float32),
+            flow_grid=flow_grid,
         )
     
 

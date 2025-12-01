@@ -30,6 +30,7 @@ class MFConfig:
     manual_anchor: dict | None = None
     of_backend: str = "RAFT"
     overwrite: bool = False
+    save_optical_flow_vectors : bool = False
 
 class MouseFlow:
     def __init__(self, dlc_dir: str | Path, cfg: MFConfig):
@@ -198,6 +199,7 @@ class MouseFlow:
     # Face analysis
     def analyse_face(self, face_file: Path):
         out_file = face_file.with_name(face_file.stem + '_mouseflow.h5')
+        out_grid = face_file.with_name(face_file.stem + '_optical_flow_grid.npz')
         if out_file.exists() and not self.cfg.overwrite:
             print(f"{out_file} already analysed, skipping ahead...")
             return
@@ -230,7 +232,7 @@ class MouseFlow:
                 video_file, face_masks)
             face_raw = pd.concat([pupil_raw, eyelid_dist_raw, face_motion], axis=1)
         else:
-            face_motion = face_processing.facemotion(video_file, face_masks, backend=self.cfg.of_backend) # switch between RAFT and Farneback is handled internally
+            face_motion, flow_grid = face_processing.facemotion(video_file, face_masks, backend=self.cfg.of_backend, save_of_vectors=True) # switch between RAFT and Farneback is handled internally
             whisk_freq = motion_processing.freq_analysis2(
                 face_motion['OFang_Whiskerpad'], fps, rollwin=fps, min_periods=int(fps*.67))
             sniff_freq = motion_processing.freq_analysis2(
@@ -243,6 +245,8 @@ class MouseFlow:
         cap.release()
         face = process_raw_data(self.cfg.smoothing_windows_sec, self.cfg.na_limit, fps, interpolation_limits, face_raw)
         self._face_to_h5(out_file, face_masks, face_anchor, face)
+        if flow_grid is not None:
+            np.savez_compressed(out_grid, flow=flow_grid)
 
     def as_series(self, x, name, idx):
         x = pd.Series(x, name=name)
@@ -351,13 +355,15 @@ def runMF(dlc_dir=os.getcwd(),
           na_limit=0.25,
           faceregions_sizes=None,
           base_resolution=None,
-          manual_anchor=None         
+          manual_anchor=None,
+          save_optical_flow_vectors=True       
     ):
 
         cfg = MFConfig(dgp, conf_thresh,
                     interpolation_limits_sec, smoothing_windows_sec,
                     na_limit, faceregions_sizes,
-                    base_resolution, manual_anchor, "RAFT", overwrite
+                    base_resolution, manual_anchor, "RAFT", overwrite,
+                    save_optical_flow_vectors
         )
 
         mf = MouseFlow(dlc_dir, cfg)

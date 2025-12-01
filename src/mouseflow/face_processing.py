@@ -180,7 +180,7 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
 
     return masks, face_anchor
 
-def facemotion(videopath, masks, backend : str, videoslice=[]):
+def facemotion(videopath, masks, backend : str, videoslice=[], save_of_vectors=True):
     gpu_flow : BaseOF = None
     if backend == 'RAFT':
         gpu_flow = RaftOF()
@@ -199,7 +199,9 @@ def facemotion(videopath, masks, backend : str, videoslice=[]):
     cols = ['MotionEnergy_Nose','MotionEnergy_Whiskerpad','MotionEnergy_Mouth','MotionEnergy_Cheek',
             'OFmag_Nose','OFmag_Whiskerpad','OFmag_Mouth','OFmag_Cheek',
             'OFang_Nose','OFang_Whiskerpad','OFang_Mouth','OFang_Cheek']
-    return pd.DataFrame(motion, columns=cols)
+    df_statistics = pd.DataFrame(motion, columns=cols)
+    flow_grid = out["flow_grid"] if save_of_vectors else None
+    return df_statistics, flow_grid
 
 # Calculating motion energy
 def facemotion_nocuda(videopath, masks, videoslice=[]):
