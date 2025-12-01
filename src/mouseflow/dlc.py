@@ -6,7 +6,7 @@ from mouseflow.utils.pytorch_utils import config_pytorch
 from mouseflow.apply_models import LPDetector, DLCDetector, download_models
 
 
-def runDLC(
+def detect_keypoints(
     vid_dir=os.getcwd(),
     face_cfg=[],
     models_dir=None,
@@ -26,7 +26,6 @@ def runDLC(
     # face/body_crop allows initial cropping of video in the form [x_start, x_end, y_start, y_end]
 
     #  To evade cuDNN error message:
-    device = config_pytorch(benchmark=True, deterministic=False)
     if models_dir is None:
         models_dir = os.path.join(os.getcwd(), "mf_models")
     model_paths = download_models(models_dir)
@@ -59,6 +58,7 @@ def runDLC(
         else:
             print(
                 f'Need to pass <facekey> or <bodykey> argument to classify video {vid_dir}.')
+    print(f"found {facefiles} and {bodyfiles}")
     if facekey == True:
         facefiles = [vid_dir]
     elif bodykey == True:
@@ -98,6 +98,8 @@ def runDLC(
         for vid in bodyfiles:
             bodyfiles_flipped.append(flip_vid(vid, horizontal=True))
         bodyfiles = bodyfiles_flipped
+
+    print(f"found {facefiles} and {bodyfiles}")
 
     # batch mode (if user specifies a number n, it will only process the first n files)
     try:

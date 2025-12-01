@@ -19,7 +19,6 @@ dependencies = [
   'h5py',
   'tqdm',
   'scipy',
-  'flow-vis'
 ]
 
 [project.urls]
