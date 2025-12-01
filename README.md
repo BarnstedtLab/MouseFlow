@@ -4,21 +4,43 @@
 A Python toolbox to quantify facial and bodily movement in headfixed mice.
 ![Sample image](img/103_behaviour.gif)
 
-
 ## Installation
-- Compile OpenCV with CUDA capabilities: https://gist.github.com/raulqf/f42c718a658cddc16f9df07ecc627be7
-- Install DeepLabCut
-- (Optional:) Install Deepgraphpose (DLC2 compatible) from https://github.com/lnguyen/deepgraphpose/tree/upgrade using pip install
-- To install MouseFlow:
+If you already have a working environment (with pytorch and deeplabcut installed) and do not want to create a new one, you can skip directly to step 6.
+Otherwise, just follow along.
+ 
+0. Make sure you have conda available on your system (otherwise, please follow the steps from the [official documentation](https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html)
+1. Download either the [linux setup file](enivronment_setup_linux.yaml) or the [windows setup file](enivronment_setup_windows.yaml), depending on your system.
+3. Setup a fresh conda environment with all dependencies needed for mouseflow by running
 ```
-pip install git+https://github.com/obarnstedt/MouseFlow
+conda env create -f path/to/downloaded/setup_file.yaml
 ```
+4. Afterwards, you should have a new conda environment called `mouseflow_env`.
+Activate it by running
+```
+conda activate mouseflow_env
+```
+5. Install deeplabcut (We need the `--pre` since we use Deeblabcut with Pytorch backend!)
+```
+pip install --pre deeplabcut
+```
+6. Finally, install the mouseflow package
+```
+pip install git+https://github.com/BarnstedtLab/MouseFlow --no-deps
+```
+(Users who directly came here without following the previous steps, please run the above command without `--no-deps`)
 
 ## Workflow
-At this point, MouseFlow contains two main functions: runDLC() and runMF().
+Currently, Mouseflow supports 3 main functions:
 
-### Face/body labelling using pre-trained models
-runDLC(models_dir, vid_dir, facekey, bodykey) will find face and body videos in a directory of choice (vid_dir) and apply pre-trained DeepLabCut models (either present or automatically downloaded into 'models_dir') on these videos.
+1. `detect_keypoints(vid_dir, face_key='face', body_key='body, face_model='DLC', body_model='DLC', filetype='.mp4')` finds all face and body videos in a directory of choice (vid_dir) and applies pre-trained DeepLabCut or LightningPose models (automatically downloaded during first use) on these videos.
+Make sure all your body videos contain the provided `body_key` somewhere in their filename and the face videos the provided `face_key`.
+If no videos are found, double check that your provided `filetype` matches your actual video files!
+Note that LightingPose (`body_key='LP'`) will only work on linux machines.
+3. `runMF(dlc_dir, save_optical_flow_vectors=True)` performs the analysis that lays the foundation for behavioral quantification.. Details are discussed [below](#Kinematics-and-optical-flow-extraction)
+`dlc_dir` should point to the directory in which the keypoint analysis files from step 1 are saved.
+if `save_optical_flow_vectors` is enabled, the optical flow output will be saved as a vectorfield (might generate large files if videos are long!) in a seperate .npz file. 
+4. `generate_preview(mouseflow_file, face_keypoint_file, face_video_file, optical_flow_file)` generates a preview video (similar to the one shown above) allowing for a quick first visual inspection of all performed analysis.
+Currently, this works for the face analysis only.
 
 ### Kinematics and optical flow extraction
 runMF(dlc_dir) runs across the resulting marker files and automatically saves data frames including, among others, the following data:
