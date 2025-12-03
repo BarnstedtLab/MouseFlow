@@ -17,7 +17,6 @@ import h5py
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
-from scipy import optimize, signal
 from scipy.stats.mstats import zscore
 from tqdm import tqdm
 
@@ -55,19 +54,26 @@ def shift5(arr, num, fill_value=np.nan):
 def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
                               generate_frames=1000, startframe=500, use_dark_background=True, resultsdir=False,
                               cols_to_plot=['PupilDiam', 'PupilX', 'MotionEnergy_Mouth', 'OFang_Whiskerpad', 'OFang_Nose'],
-                              blend_gray_optflow=0.5, smooth_data=15, dlc_conf_thresh=0.99):
+                              blend_gray_optflow=0.5, smooth_data=15, dlc_conf_thresh=None, processing_stage=None, make_video=True):                        
     facemp4 = cv2.VideoCapture(path_vid_face)
-    facemp4.set(1, startframe)
+    facemp4.set(cv2.CAP_PROP_POS_FRAMES, startframe) # jump straight to the first frame wanted (explicit constant = clearer than “1”)
     FaceCam_FPS = facemp4.get(cv2.CAP_PROP_FPS)
     index = startframe
-    if type(generate_frames)==int:
+    if isinstance(generate_frames, int): # it's is True 
+        # give an **exact count** → stop after N frames
+        lastframe = startframe + generate_frames # track the last frame not just the count
         vidlength = generate_frames
     elif generate_frames==True:
-        vidlength = int(facemp4.get(7))
+        # special flag: label the *whole* video
+        lastframe = int(facemp4.get(cv2.CAP_PROP_FRAME_COUNT)) # total frames
+        index = 0
+        vidlength = lastframe # same number as total frames
     elif len(generate_frames)==2:
-        facemp4.set(1, generate_frames[0])
-        vidlength = generate_frames[1] - generate_frames[0]
-        index = generate_frames[0]
+        # give a [start, end) slice → reposition and compute lengths
+        facemp4.set(1, generate_frames[0]) # jump to slice start
+        lastframe = generate_frames[1] # absolute end frame
+        index = generate_frames[0] # absolute start frame
+        vidlength = lastframe - index # number of frames in the slice
     print("Labelling face video...")
     ret, current_frame = facemp4.read()
     previous_frame = current_frame
@@ -75,13 +81,16 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
     gpu_flow = cv2.cuda_FarnebackOpticalFlow.create(numLevels=5, pyrScale=.5, fastPyramids=True, winSize=25,
                                                         numIters=3, polyN=5, polySigma=1.2, flags=0)
 
+    # Load DLC points and face data
+    # get rid of pupil cos it is not a seperate dataframe with a key
     dlc_face = pd.read_hdf(path_dlc_face)
-    hfg = h5py.File(path_mf)
-    facemasks = (np.array(hfg['facemasks'])).astype('float32')
-    pupil = pd.read_hdf(path_mf, 'pupil')
+    with h5py.File(path_mf, "r") as hfg: # auto-closes on exit
+        facemasks = hfg["facemasks"][:].astype("float32")
     face = pd.read_hdf(path_mf, 'face')
     face_anchor = pd.read_hdf(path_mf, 'face_anchor')
     
+
+    # Prepare layout
     plt.close("all")
     # plt.ioff()  # hide figures
     plt.ion()  # show figures
@@ -95,45 +104,99 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
     if not resultsdir:
         resultsdir = os.path.join(os.path.dirname(path_dlc_face), 'mouseflow_'+os.path.basename(path_vid_face).split('.')[0])
     if not os.path.exists(resultsdir):
-        os.makedirs(resultsdir)
+        os.makedirs(resultsdir, exist_ok=True) # suppresses the FileExistsError if exists
 
     showseconds = 10
     showtimepoints = int(FaceCam_FPS) * showseconds
     midpoint = int(showtimepoints/2)
-    facedata = face.iloc[index-midpoint:index+generate_frames+midpoint][cols_to_plot].apply(zscore).rolling(smooth_data).mean()
-    facedatapoints = shift5(facedata.values[:], -index)
-    minvalue = min(np.array(facedata.quantile(q=.01)) - np.array(range(len(facedata.columns))))
-    maxvalue = max(np.array(facedata.quantile(q=.99)) - np.array(range(len(facedata.columns))))
+    idx = pd.IndexSlice
+    # Select which processing stage we want to visualise 
+    if processing_stage in ('raw', 'interpolated'):
+        # pull raw/interpolated columns, then smooth + z-score
+        data = face.loc[:, idx[processing_stage, cols_to_plot]]
+        face_data = data.apply(zscore).rolling(smooth_data, center=True, min_periods=1).mean()
+    elif processing_stage == 'smooth':
+        # already smoothed → just z-score
+        data = face.loc[:, idx['smooth', cols_to_plot]]
+        face_data = data.apply(zscore)
+    elif processing_stage == 'zscore':
+        # already z-scored → just smooth for display
+        data = face.loc[:, idx['zscore', cols_to_plot]]
+        cols_to_smooth = ['OFmag_Mouth', 'OFmag_Cheek']
+        cols_to_smooth_full = [('zscore', c) for c in cols_to_smooth]
+        cols_unsmoothed_full = [col for col in data.columns if col not in cols_to_smooth_full]
+        smoothed = data[cols_to_smooth_full].rolling(smooth_data, center=True, min_periods=1).mean()
+        unsmoothed = data[cols_unsmoothed_full]
+        face_data     = pd.concat([smoothed, unsmoothed], axis=1)[data.columns]
+    else:
+        raise ValueError(f"Unknown stage {processing_stage}")
+    trace_spacing = 3
+    mins = face_data.quantile(0.01) - np.arange(face_data.shape[1]) * trace_spacing
+    maxs = face_data.quantile(0.99) - np.arange(face_data.shape[1]) * trace_spacing
+    minvalue, maxvalue = mins.min(), maxs.max()
     cmap = plt.get_cmap('Dark2')
+
+    # Extra helper vars
+    # the order of regions matches the order of facemarks so that the bottom traces match the upper left plot
+    region_order = ['Nose', 'Whiskerpad', 'Mouth', 'Cheek'] # same order as masks
+    region_to_idx = {}
+    for idx, col in enumerate(cols_to_plot):
+        for region in region_order:
+            if col.lower().endswith(region.lower()): # cos the 'cols_to_plot' is named: OFmag_Nose....
+                region_to_idx[region] = idx # remember colour slot for that region
+                break # stop scanning that col once matched
+    fallback_idx = 0
+    # identify pupil landmark indices inside DLC MultiIndex
+    pupil_pts = []
+    cols = dlc_face.columns
+    num_pts = len(cols) // 3                
+    for i in range(num_pts):
+        xcol = cols[i*3]                    # first col of each triplet
+        bodypart = xcol[1] if isinstance(xcol, tuple) else xcol # if the DLC MultiIndex column (example: ('DLC_resnet50', 'pupil1', 'x')) then take the bodypart name (2nd element)
+        if bodypart.lower().startswith('pupil'):
+            pupil_pts.append(i)
 
     with tqdm(total=vidlength) as pbar:
         while facemp4.isOpened():
-            # shift X window of data
+            # == BOTTOM PANEL ==
+            # x-axis setup
             axd['bottom'].cla()
-            axd['bottom'].set_xlim(0, showtimepoints);
-            axd['bottom'].set_xticks(ticks=np.arange(0, showtimepoints, int(FaceCam_FPS)));
-            axd['bottom'].set_xticklabels([str(a) for a in range(-5, 5)]);
-            axd['bottom'].set_ylim(minvalue, maxvalue)
-            axd['bottom'].set_yticks(np.arange(-len(facedata.columns)+1, 1))
-            axd['bottom'].set_yticklabels(reversed(cols_to_plot), fontsize=12, fontweight='bold')
-            facedatapointsshifted = shift5(facedatapoints, midpoint-index)
-            for i in range(len(facedatapoints.transpose())):
-                axd['bottom'].axhline(y=-i, linestyle='--', color=cmap(i), alpha=.5, linewidth=1.2)
-                axd['bottom'].plot(facedatapointsshifted.transpose()[i] - i, color=cmap(i))
-                # plt.legend(facenames, loc=2)
-            if use_dark_background:
-                axd['bottom'].axvline(x=midpoint, color='white')
-            else:
-                axd['bottom'].axvline(x=midpoint, color='black')
-            j = len(face.columns)-1
-            for i in axd['bottom'].get_yticklabels():
-                i.set_color(cmap(j))
-                j -= 1
+            axd['bottom'].set_xlim(0, showtimepoints)
+            # generate ticks for every fps
+            frame_ticks = np.arange(0, showtimepoints + 1, FaceCam_FPS)
+            # convert frame indices to “seconds from center” so labels
+            sec_ticks = (frame_ticks - midpoint) / FaceCam_FPS
+            axd['bottom'].set_xticks(frame_ticks)
+            axd['bottom'].set_xticklabels([f"{s:.0f}" for s in sec_ticks])      
+            # y-axis setup
+            pad = (maxvalue - minvalue) * 0.15           # 30 % head/foot-value
+            axd['bottom'].set_ylim(minvalue - pad, maxvalue + pad)
+            axd['bottom'].set_yticks(-np.arange(len(cols_to_plot)) * trace_spacing)
+            axd['bottom'].set_yticklabels(cols_to_plot, fontsize=15, fontweight='bold')
+            # data plotting
+            start = max(index - midpoint, face_data.index.min()) # take the first valid frame
+            end = min(index + midpoint, face_data.index.max())
+            window = face_data.loc[start:end]
+            # pad with NaNs if we’re near start/end of video so the plotted window is always `showtimepoints` long.
+            if len(window) < showtimepoints:
+                top_pad = max(0, midpoint - (index - start))
+                bot_pad = showtimepoints - len(window) - top_pad
+                pad_top = np.full((top_pad, window.shape[1]), np.nan)
+                pad_bot = np.full((bot_pad, window.shape[1]), np.nan)
+                window = pd.DataFrame(
+                    np.vstack([pad_top, window.values, pad_bot]),
+                    columns=window.columns)
+            # plot each trace
+            for i, col in enumerate(cols_to_plot):
+                axd['bottom'].axhline(-i * trace_spacing, linestyle='--',
+                                    color=cmap(i), alpha=0.5, linewidth=1.2)
+                axd['bottom'].plot(window.values[:, i] - i * trace_spacing, color=cmap(i))
+            axd['bottom'].axvline(midpoint, color='white' if use_dark_background else 'black')
             axd['bottom'].set_xlabel('Time [sec]')
 
-            current_frame_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-
+            # == TOP PANEL ==
             # plot optical flow face frame
+            current_frame_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
             axd['upper left'].cla()
             previous_frame_gray = cv2.cvtColor(previous_frame, cv2.COLOR_BGR2GRAY)
             gpu_frame = cv2.cuda_GpuMat()
@@ -152,10 +215,11 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
             axd['upper left'].text(10, 30, "%06d" % index, color='w')
 
             # plot face regions
-            for i in range(len(facemasks)):
-                axd['upper left'].contour(facemasks[i], colors=[cmap(i+2)], linestyles='--', size=5)
+            for mask, region in zip(facemasks, region_order):
+                colour_idx = region_to_idx.get(region, fallback_idx)
+                axd['upper left'].contour(mask, colors=[cmap(colour_idx)], linestyles='--', linewidths=2)
 
-            # plot face frame
+            # Raw face with calculated anchor points
             axd['upper centre'].cla()
             axd['upper centre'].imshow(current_frame_gray, cmap='gray')
             axd['upper centre'].axis('off')
@@ -164,7 +228,7 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
 
             # plot fix points
             for key in face_anchor:
-                axd['upper centre'].scatter(face_anchor[key][0], face_anchor[key][1], s=200, color='w', alpha=.5)
+                axd['upper centre'].scatter(*face_anchor[key], s=200, color='w', alpha=0.5)
 
             # plot skeleton
             axd['upper centre'].plot([face_anchor.nosetip[0], face_anchor.forehead[0]], [face_anchor.nosetip[1], face_anchor.forehead[1]], color='w')
@@ -174,42 +238,97 @@ def create_labeled_video_face(path_vid_face, path_dlc_face, path_mf,
             axd['upper centre'].plot([face_anchor.eyelid_bottom[0], face_anchor.chin[0]], [face_anchor.eyelid_bottom[1], face_anchor.chin[1]], color='w')
 
             # plot dynamic DLC points whole face
-            for i in range(np.uint8(len(dlc_face.columns)/3)-6):
-                if dlc_face.values[index][i*3+2] > dlc_conf_thresh:
-                    axd['upper centre'].scatter(dlc_face.values[index][i*3], dlc_face.values[index][i*3+1], alpha=0.7, s=100, color='w')
-            axd['upper centre'].scatter(pupil['x_raw'][index], pupil['y_raw'][index], alpha=0.7, s=30, color='w')
-            axd['upper centre'].set_xlim(0, facemp4.get(3))
-            axd['upper centre'].set_ylim(facemp4.get(4), 0)
+            for i in range(num_pts - 6):
+                if dlc_face.values[index, i*3+2] > dlc_conf_thresh:
+                    axd['upper centre'].scatter(dlc_face.values[index, i*3], dlc_face.values[index, i*3+1], alpha=0.7, s=100, color='w')
+            axd['upper centre'].scatter(face.loc[index, ('raw','PupilX')], face.loc[index, ('raw','PupilY')], alpha=0.7, s=30, color='w')
+            axd['upper centre'].set_xlim(0, facemp4.get(cv2.CAP_PROP_FRAME_WIDTH))
+            axd['upper centre'].set_ylim(facemp4.get(cv2.CAP_PROP_FRAME_HEIGHT), 0)
 
-            # plot eye detail
+            # Eye-detail crop
             axd['upper right'].cla()
-            pupilmeanx = np.round(np.mean(pupil['x_smooth'])).astype(int)
-            pupilmeany = np.round(np.mean(pupil['y_smooth'])).astype(int)
-            axd['upper right'].imshow(current_frame_gray[pupilmeany-90:pupilmeany+90, pupilmeanx-120:pupilmeanx+120], cmap='gray')
+            meanx = face[('smooth','PupilX')].mean()
+            pupilmeanx = np.float64(meanx).round().astype(int)
+            meany = face[('smooth','PupilY')].mean()
+            pupilmeany = np.float64(meany).round().astype(int)
+            eye_w, eye_h = 240, 180
+            x0, y0 = pupilmeanx - eye_w//2, pupilmeany - eye_h//2
+            eye_patch = current_frame_gray[y0:y0+eye_h, x0:x0+eye_w]
+            axd['upper right'].imshow(eye_patch, cmap='gray')
             axd['upper right'].axis('off')
 
-            # plot eye DLC points
-            for i in range(4, np.uint8(len(dlc_face.columns)/3)):
-                axd['upper right'].scatter(dlc_face.values[index][i*3]-(pupilmeanx-120), dlc_face.values[index][i*3+1]-(pupilmeany-90), alpha=1, s=100, color='w')
-            axd['upper right'].plot([(dlc_face.values[index][12]-(pupilmeanx-120)), (dlc_face.values[index][15]-(pupilmeanx-120))], [(dlc_face.values[index][13]-(pupilmeany-90)), (dlc_face.values[index][16]-(pupilmeany-90))], color=cmap(1))
-            axd['upper right'].plot([(dlc_face.values[index][12]-(pupilmeanx-120)), (dlc_face.values[index][18]-(pupilmeanx-120))], [(dlc_face.values[index][13]-(pupilmeany-90)), (dlc_face.values[index][19]-(pupilmeany-90))], color=cmap(1))
-            axd['upper right'].scatter(pupil['x_raw'][index]-(pupilmeanx-120), pupil['y_raw'][index]-(pupilmeany-90), alpha=0.7, s=100, color='w')
+            # Overlay all in‐patch DLC eye detail points
+            pts_in_patch = 0
+            for i in range(4, num_pts):
+                x, y, lik = dlc_face.values[index, i*3:i*3+3]
+                if lik >= dlc_conf_thresh:
+                    xr, yr = x - x0, y - y0
+                    if 0 <= xr < eye_w and 0 <= yr < eye_h: # prevents plotting points that lie outside the 240×180 crop
+                        pts_in_patch += 1
+                        axd['upper right'].scatter(xr, yr, alpha=0.8, s=100, color='w')
 
-            # plot pupil
-            pupilplot = plt.Circle((np.round(pupil['x_interp'][index]).astype(int)-(pupilmeanx-120), np.round(pupil['y_interp'][index]).astype(int)-(pupilmeany-90)), np.round(pupil['diam_interp'][index]).astype(int), color=cmap(0), alpha=0.5, fill=False, linewidth=3)
-            axd['upper right'].add_artist(pupilplot)
+            # boundary check: avoids ValueError if the line end fell out of crop
+            if (0 <= dlc_face.values[index][12] - x0 < eye_w
+                and 0 <= dlc_face.values[index][13] - y0 < eye_h
+                and 0 <= dlc_face.values[index][15] - x0 < eye_w
+                and 0 <= dlc_face.values[index][16] - y0 < eye_h):
+                axd['upper right'].plot(
+                    [dlc_face.values[index][12] - x0, dlc_face.values[index][15] - x0],   
+                    [dlc_face.values[index][13] - y0, dlc_face.values[index][16] - y0],
+                    color='yellow', linewidth=1.5
+                )
+            if (0 <= dlc_face.values[index][12] - x0 < eye_w
+                and 0 <= dlc_face.values[index][13] - y0 < eye_h
+                and 0 <= dlc_face.values[index][18] - x0 < eye_w
+                and 0 <= dlc_face.values[index][19] - y0 < eye_h):
+                axd['upper right'].plot(
+                    [dlc_face.values[index][12] - x0, dlc_face.values[index][18] - x0],  
+                    [dlc_face.values[index][13] - y0, dlc_face.values[index][19] - y0],
+                    color='yellow', linewidth=1.5
+                )
+
+            # count in‐patch DLC pupil points
+            pupil_in_patch = 0
+            for ci in pupil_pts:
+                x, y, lik = dlc_face.values[index, ci*3:ci*3+3]
+                if lik >= dlc_conf_thresh:
+                    xr, yr = x - x0, y - y0
+                    if 0 <= xr < eye_w and 0 <= yr < eye_h:
+                        pupil_in_patch += 1
+            # Draw circle
+            cx = face.loc[index, ('smooth','PupilX')] - x0
+            cy = face.loc[index, ('smooth','PupilY')] - y0
+            r  = face.loc[index, ('smooth','PupilDiam')]
+            if pupil_in_patch >= 3 and (cx - r >= 0) and (cy - r >= 0) and (cx + r <= eye_w) and (cy + r <= eye_h):
+                circle = plt.Circle((cx, cy), r, edgecolor=cmap(0), facecolor='none', linewidth=3, alpha=0.8)
+                axd['upper right'].add_patch(circle)
 
             plt.tight_layout()
-            plt.savefig(os.path.join(resultsdir, "file%06d.png" % index))
+            plt.savefig(os.path.join(resultsdir, f"file_{index:06d}.png"))
 
             pbar.update(1)
             index += 1
-            if index > vidlength:
+            if index >= lastframe:
                 break
+            previous_frame = current_frame # update to the frame just finished processing, so at the start of the next iteration it truly holds the previous frame
             ret, current_frame = facemp4.read()
             if current_frame is None:
                 break
     facemp4.release()
+    if make_video:
+        frames = sorted(glob.glob(os.path.join(resultsdir, 'file_*.png')))
+        if not frames:
+            raise RuntimeError(f"No frames found in {resultsdir}. Ensure the save pattern matches the glob.")
+        vid_dirout = os.path.join(resultsdir, 'labeled_face_video.mp4')
+        first = cv2.imread(frames[0])
+        h, w = first.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(vid_dirout, fourcc, FaceCam_FPS, (w, h))
+        for fname in frames:
+            img = cv2.imread(fname)
+            writer.write(img)
+        writer.release()
+        print(f"Saved labeled video to {vid_dirout}")
 
 
 

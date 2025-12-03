@@ -611,7 +611,7 @@ def dlc_pointdistance2(point1, point2):
     return pd.Series(np.linalg.norm((point2 - point1), axis=1))
 
 def freq_analysis(x, f_s=75, M=128):
-    freqs, times, Sx = signal.spectrogram(x, fs=f_s, window='hanning',
+    freqs, times, Sx = signal.spectrogram(x, fs=f_s, window='hamming',
                                           nperseg=M, noverlap=M - 50,
                                           detrend=False, scaling='spectrum')
     max_freq = pd.DataFrame(data={'Time': times, 'maxf': np.argmax(Sx, axis=0)})
@@ -629,11 +629,16 @@ def freq_analysis(x, f_s=75, M=128):
     # ax[3].plot(timing, motion_frontpaw)
 
 def freq_analysis2(x, fps, rollwin=75, min_periods=50, conf=0.5):
-    if 'x' in x:
-        x.loc[x.likelihood < conf] = np.nan
-        y = x.x
-    else:
+    if isinstance(x, pd.DataFrame) and {'x', 'likelihood'}.issubset(x.columns):
+        x_filtered = x.copy()
+        x_filtered.loc[x_filtered['likelihood'] < conf, 'x'] = np.nan
+        y = x_filtered['x']
+    elif isinstance(x, pd.DataFrame) and 'x' in x.columns:
+        y = x['x']
+    elif isinstance(x, pd.Series):
         y = x
+    else:
+        raise ValueError("Input must be a pandas Series or a DataFrame containing an 'x' column (and optionally 'likelihood').")
     xinterp = y.interpolate(method='linear')
     xz = (xinterp - xinterp.min()) / (xinterp - xinterp.min()).max()
     print('Fitting sine...')
@@ -644,7 +649,7 @@ def freq_analysis2(x, fps, rollwin=75, min_periods=50, conf=0.5):
     w_clean[error>(fps/100)] = np.nan
     w_clean[w_clean<0] = np.nan
     w_clean = w_clean.interpolate(method='polynomial', order=3, limit=int(fps*2))
-    w_smooth = w_clean.rolling(int(rollwin/3), center=True, min_periods=int(min_periods/3)).mean(window='gaussian')
+    w_smooth = (w_clean.rolling(window=int(rollwin/3), win_type='gaussian', center=True, min_periods=int(min_periods/3),).mean(std=rollwin/3))
     f_smooth = w_smooth/(2.*np.pi)*fps
     return f_smooth
 
@@ -659,12 +664,19 @@ def dlc_pointphasecorr(point1, point2, body_conf_thresh=.5, body_interpolation_l
     return pd.Series(running_corr)
 
 
-def hilbert_peaks(x, fps, fc=10, butterN=5, peakprom=1.5):
+def hilbert_peaks(x, fps, fc=None, butterN=5, peakprom=1.5):
     env = np.abs(signal.hilbert(x))
+    nyquist = fps/2.0
     # Low-Pass Butter filter:
-    w = fc / (fps / 2)  # Normalize the frequency to SamplingFrequency
+    # If no cutoff given or too high, use half‑Nyquist
+    if fc is None or fc >= nyquist:
+        fc_used = nyquist * 0.5
+    else:
+        fc_used = fc
+    w = fc_used / nyquist  # always < 1
     b, a = signal.butter(butterN, w, 'low')
-    mouth_envfilt = pd.Series(signal.filtfilt(b, a, env)).shift(12)
+    shift_amt = int(0.6 * fps)
+    mouth_envfilt = pd.Series(signal.filtfilt(b, a, env)).shift(shift_amt)
     peaks = signal.find_peaks(mouth_envfilt, prominence=peakprom)[0]
     peakbool = np.zeros(len(x))
     peakbool[peaks] = 1

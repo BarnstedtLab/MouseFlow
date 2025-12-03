@@ -1,0 +1,27 @@
+name: mouseflow_env
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  # CUDA-enabled PyTorch from conda
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
+  - numpy>=2
+  - pytables>=3.9.2
+  - ffmpeg
+  - scipy
+  - pandas
+  - pip
+  - pip:
+      - lightning-pose # LightningPose (will use the conda PyTorch you installed)
+      - pyocclient # for downloading owncloud files (the model weights)
+
+
+  # Install DLC manually(!!)
+  # (not in this file because the pre release version is needed for pytorch support) via:
+  # pip install --pre deeplabcut

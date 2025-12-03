@@ -6,18 +6,8 @@ Created on Wed May  8 14:31:51 2019
 @author: Oliver Barnstedt
 """
 
-
-import os.path
-import glob
 import pandas as pd
-from tqdm import tqdm
-import cv2
-from matplotlib import pyplot as plt
-import math
 import numpy as np
-from scipy.stats.mstats import zscore
-from scipy import signal, optimize
-
 
 # preallocate empty array and assign slice by chrisaycock
 def shift5(arr, num, fill_value=np.nan):
@@ -97,13 +87,13 @@ def process_raw_data(smoothing_windows_sec, na_limit, FaceCam_FPS, interpolation
                                 for (x, k) in smoothing_windows_sec.items()}
     face_smooth = face_interp.copy()
     face_smooth['PupilDiam'] = face_smooth['PupilDiam'].rolling(
-            window=smoothing_windows_frames['PupilDiam'], center=True).mean()
+            window=smoothing_windows_frames['PupilDiam'], center=True).mean().astype('float32')
     face_smooth[['PupilX', 'PupilY', 'PupilMotion']] = \
             face_smooth[['PupilX', 'PupilY', 'PupilMotion']].rolling(
-            window=smoothing_windows_frames['PupilMotion'], center=True).mean()
+            window=smoothing_windows_frames['PupilMotion'], center=True).mean().astype('float32')
     face_smooth.loc[:, face_smooth.columns.str.startswith('MotionEnergy')] = \
             face_smooth.loc[:, face_smooth.columns.str.startswith('MotionEnergy')].rolling(
-            window=smoothing_windows_frames['MotionEnergy'], center=True).mean()
+            window=smoothing_windows_frames['MotionEnergy'], center=True).mean().astype('float32')
 
     # Z-scoring data
     face_zscore = face_smooth.apply(lambda a: (a - a.mean())/a.std(ddof=0))
