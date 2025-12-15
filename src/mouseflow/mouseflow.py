@@ -104,7 +104,7 @@ class MouseFlow:
         ]
 
         if not candidates:
-            raise FileNotFoundError(f"No video starting with '{prefix}' in {self.dlc_dir}")
+            raise FileNotFoundError(f"No video starting with '{prefix}' in {self.dlc_dir.parent}")
 
         if len(candidates) > 1:
             raise RuntimeError(

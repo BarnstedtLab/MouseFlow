@@ -58,7 +58,6 @@ def detect_keypoints(
         else:
             print(
                 f'Need to pass <facekey> or <bodykey> argument to classify video {vid_dir}.')
-    print(f"found {facefiles} and {bodyfiles}")
     if facekey == True:
         facefiles = [vid_dir]
     elif bodykey == True:
@@ -71,9 +70,11 @@ def detect_keypoints(
         facefiles = glob.glob(os.path.join(vid_dir, '*'+facekey+'*'+filetype))
         bodyfiles = glob.glob(os.path.join(vid_dir, '*'+bodykey+'*'+filetype))
 
+    print(f"found {facefiles} and {bodyfiles}")
+    facefiles = [f for f in facefiles if 'labeled' not in f]  # sort out already labeled videos
     # cropping videos
-    facefiles = [f for f in facefiles if '_cropped.*' not in f]  # sort out already cropped videos
-    bodyfiles = [b for b in bodyfiles if '_cropped.*' not in b]  # sort out already cropped videos
+    facefiles = [f for f in facefiles if '_cropped' not in f]  # sort out already cropped videos
+    bodyfiles = [b for b in bodyfiles if '_cropped' not in b]  # sort out already cropped videos
     if face_crop:
         facefiles_cropped = []
         for vid in facefiles:
@@ -86,8 +87,8 @@ def detect_keypoints(
         bodyfiles = bodyfiles_cropped
 
     # flipping videos
-    facefiles = [f for f in facefiles if '_flipped.*' not in f]  # sort out already flipped videos
-    bodyfiles = [b for b in bodyfiles if '_flipped.*' not in b]  # sort out already flipped videos
+    facefiles = [f for f in facefiles if '_flipped' not in f]  # sort out already flipped videos
+    bodyfiles = [b for b in bodyfiles if '_flipped' not in b]  # sort out already flipped videos
     if face_facing != 'left':
         facefiles_flipped = []
         for vid in facefiles:

@@ -1,5 +1,6 @@
 import cv2
 from tqdm import tqdm
+from pathlib import Path
 
 def flip_vid(vid_orig, horizontal=False, vertical=False):
     cap = cv2.VideoCapture(vid_orig)
@@ -7,10 +8,14 @@ def flip_vid(vid_orig, horizontal=False, vertical=False):
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     vidlength = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    vid_flipped = cv2.VideoWriter(vid_orig[:-4]+'_flipped.mp4', cv2.VideoWriter_fourcc(*"mp4v"),
+    vid_flipped_name = (vid_orig[:-4]+'_flipped.mp4')
+    if Path(vid_flipped_name).exists():
+        print("video already flipped, skipping...")
+        return vid_flipped_name
+    vid_flipped = cv2.VideoWriter(vid_flipped_name, cv2.VideoWriter_fourcc(*"mp4v"),
                                   fps, (frame_width, frame_height))
     
-    print('Flipping video...')
+    print(f'Flipping video {vid_orig}')
     with tqdm(total=vidlength) as pbar:
         while cap.isOpened():
             ret, current_frame = cap.read()
@@ -23,7 +28,7 @@ def flip_vid(vid_orig, horizontal=False, vertical=False):
             vid_flipped.write(current_frame)
             pbar.update(1)
 
-    return vid_orig[:-4]+'_flipped.mp4'
+    return vid_flipped_name
 
 def crop_vid(vid_orig, crop):
     crop = [int(c) for c in crop]  # ensuring only integers in list
