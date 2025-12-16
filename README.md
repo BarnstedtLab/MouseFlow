@@ -5,6 +5,7 @@ A Python toolbox to quantify facial and bodily movement in headfixed mice.
 ![Sample image](img/103_behaviour.gif)
 
 ## Installation
+<img align="right" width="300" height="300" src="https://github.com/user-attachments/assets/7a01dfbf-11f8-422a-bbee-c270868c1361"/>
 If you already have a working environment (with pytorch and deeplabcut installed) and do not want to create a new one, you can skip directly to step 6.
 Otherwise, just follow along.
  
