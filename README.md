@@ -1,7 +1,7 @@
 # MouseFlow
 
 ## Description
-A Python toolbox to quantify facial and bodily movement in headfixed mice.
+A Python toolbox to quantify fined-scale facial and bodily movement in headfixed mice. MouseFlow integrates pose estimation, optical flow, and kinematic analyses in a single open-source workflow, reducing manual labelling and simultaneously capturing global behavioral dynamics
 ![Sample image](img/103_behaviour.gif)
 
 ## Installation
