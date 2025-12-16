@@ -71,4 +71,4 @@ MouseFlow is under active development and we welcome community contributions. We
 
 We thank our collaborators: Janelle Pakan (LIN Magdeburg), Emilie Macé (UMG Göttingen), Simon Musall (RWTH Aachen), Jan Gründemann (DZNE Bonn), Yangfan Peng (Charité Berlin), Ricardo Paricio-Montesinos (DZNE Bonn), Sanja Mikulovic (LIN Magdeburg), Petra Mocellin (LIN Magdeburg), Liudmila Sosulina (LIN Magdeburg), and Falko Fuhrmann (DZNE Bonn) for generously sharing their data, which allowed us to enhance the performance of our pre-trained models.
 
-We are also greatful to Nick del Grosso (iBOTS iBehave Bonn) for his invaluable support and expertise in Python, especially during the early stage of setting up the package.
+We are also greatful to Nick del Grosso (iBOTS iBehave Bonn) and Sangeetha Nandakumar (iBOTS iBehave Bonn) for their invaluable support and expertise in Python, especially during the early stage of setting up the package.
