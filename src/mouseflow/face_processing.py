@@ -8,6 +8,7 @@ Created on Wed May  8 14:31:51 2019
 from typing import NamedTuple
 
 import glob
+from time import time
 import math
 import os.path
 
@@ -18,7 +19,7 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 
 from mouseflow.utils.generic import smooth
-from mouseflow.optical_flow import FarnebackOF, RaftOF, BaseOF
+from mouseflow.optical_flow import FarnebackOF, BaseOF, DISFlowOF
 
 plt.interactive(False)
 
@@ -134,6 +135,7 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
     eyelid_pt  = get_pt('eyelid_bottom')
 
     # whisker inference
+    whisker_r = 0.0
     if nose_pt is None or mouth_pt is None or tear_pt is None:
         mask_whiskers = canvas.astype(bool)
     else:
@@ -181,20 +183,23 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
     return masks, face_anchor
 
 def facemotion(videopath, masks, backend : str, videoslice=[], save_of_vectors=True):
-    gpu_flow : BaseOF = None
-    if backend == 'RAFT':
-        gpu_flow = RaftOF()
-    elif backend == 'Farneback':
-        gpu_flow = FarnebackOF()
+    optical_flow : BaseOF = None
+    if backend == 'Farneback':
+        optical_flow = FarnebackOF()
+    elif backend == 'DIS':
+        optical_flow = DISFlowOF()
     else:
-        raise RuntimeError(f"Unexpected flow type {backend}, expected 'RAFT' or 'Farneback'.")
+        raise RuntimeError(f"Unexpected flow type {backend}, expected 'Farneback' or 'DIS'.")
     if videoslice:
         start, end = videoslice[0], videoslice[1]
     else:
         start, end = 0, None
-    gpu_flow.set_masks(masks) # upload ROI masks to gpu
-    gpu_flow.open(videopath, start=start, end=end) # opens video
-    out = gpu_flow.run()  # dict of CPU arrays containing below arrays
+    optical_flow.open(videopath, start=start, end=end) # opens video
+    optical_flow.set_masks(masks) # upload ROI masks to gpu or load them into RAM
+    start = time()
+    out = optical_flow.run()  # dict of CPU arrays containing below arrays
+    end = time()
+    print(f"optical flow took {end - start} seconds")
     motion = np.hstack([out['diff'], out['mag'], out['ang']])
     cols = ['MotionEnergy_Nose','MotionEnergy_Whiskerpad','MotionEnergy_Mouth','MotionEnergy_Cheek',
             'OFmag_Nose','OFmag_Whiskerpad','OFmag_Mouth','OFmag_Cheek',

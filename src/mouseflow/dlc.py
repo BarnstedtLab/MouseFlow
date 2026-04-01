@@ -2,7 +2,6 @@ import os
 import glob
 from pathlib import Path
 from mouseflow.utils.preprocess_video import flip_vid, crop_vid
-from mouseflow.utils.pytorch_utils import config_pytorch
 from mouseflow.apply_models import LPDetector, DLCDetector, download_models
 
 
@@ -19,13 +18,12 @@ def detect_keypoints(
     face_crop=None, body_crop=None
 ):
     # vid_dir defines directory to detect face/body videos, standard: current working directory
-    # facekey defines unique string that is contained in all face videos. If None, no face videos will be considered.
-    # bodykey defines unique string that is contained in all body videos. If None, no body videos will be considered.
+    # facekey defines unique string that is contained in all face videos. If None, no face videos will be considered. If True, analyse all videos as if they were face videos
+    # bodykey defines unique string that is contained in all body videos. If None, no body videos will be considered. If True, analyse all videos as if they were body videos
     # dgp defines whether to use DeepGraphPose (if True), otherwise resorts to DLC
     # batch defines how many videos to analyse ('all' for all, integer for the first n videos)
     # face/body_crop allows initial cropping of video in the form [x_start, x_end, y_start, y_end]
 
-    #  To evade cuDNN error message:
     if models_dir is None:
         models_dir = os.path.join(os.getcwd(), "mf_models")
     model_paths = download_models(models_dir)
@@ -50,19 +48,10 @@ def detect_keypoints(
     # identify video files
     facefiles = []
     bodyfiles = []
-    if os.path.isfile(vid_dir):
-        if facekey in vid_dir:
-            facefiles = [vid_dir]
-        elif bodykey in vid_dir:
-            bodyfiles = [vid_dir]
-        else:
-            print(
-                f'Need to pass <facekey> or <bodykey> argument to classify video {vid_dir}.')
-    print(f"found {facefiles} and {bodyfiles}")
     if facekey == True:
-        facefiles = [vid_dir]
+        facefiles = glob.glob(os.path.join(vid_dir, '*' + filetype))
     elif bodykey == True:
-        bodyfiles = [vid_dir]
+        bodyfiles = glob.glob(os.path.join(vid_dir, '*' + filetype))
     elif facekey == '' or facekey == False or facekey == None:
         bodyfiles = glob.glob(os.path.join(vid_dir, '*'+bodykey+'*'+filetype))
     elif bodykey == '' or bodykey == False or bodykey == None:
@@ -71,9 +60,11 @@ def detect_keypoints(
         facefiles = glob.glob(os.path.join(vid_dir, '*'+facekey+'*'+filetype))
         bodyfiles = glob.glob(os.path.join(vid_dir, '*'+bodykey+'*'+filetype))
 
+    print(f"found following face files {facefiles} and following bodyfiles {bodyfiles}")
+    facefiles = [f for f in facefiles if 'labeled' not in f]  # sort out already labeled videos
     # cropping videos
-    facefiles = [f for f in facefiles if '_cropped.*' not in f]  # sort out already cropped videos
-    bodyfiles = [b for b in bodyfiles if '_cropped.*' not in b]  # sort out already cropped videos
+    # facefiles = [f for f in facefiles if '_cropped' not in f]  # sort out already cropped videos
+    # bodyfiles = [b for b in bodyfiles if '_cropped' not in b]  # sort out already cropped videos
     if face_crop:
         facefiles_cropped = []
         for vid in facefiles:
@@ -86,8 +77,8 @@ def detect_keypoints(
         bodyfiles = bodyfiles_cropped
 
     # flipping videos
-    facefiles = [f for f in facefiles if '_flipped.*' not in f]  # sort out already flipped videos
-    bodyfiles = [b for b in bodyfiles if '_flipped.*' not in b]  # sort out already flipped videos
+    facefiles = [f for f in facefiles if '_flipped' not in f]  # sort out already flipped videos
+    bodyfiles = [b for b in bodyfiles if '_flipped' not in b]  # sort out already flipped videos
     if face_facing != 'left':
         facefiles_flipped = []
         for vid in facefiles:

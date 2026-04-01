@@ -4,6 +4,7 @@
 import os
 
 # import gdown
+import torch
 import cv2
 import h5py
 import numpy as np
@@ -31,6 +32,7 @@ class MFConfig:
     of_backend: str = "RAFT"
     overwrite: bool = False
     save_optical_flow_vectors : bool = False
+    batch : tuple = None
 
 class MouseFlow:
     def __init__(self, dlc_dir: str | Path, cfg: MFConfig):
@@ -41,6 +43,10 @@ class MouseFlow:
         files = self._analysis_files()
         face_files = files['face_files']
         body_files = files['body_files']
+        if self.cfg.batch is not None:
+            start, end = self.cfg.batch
+            face_files = face_files[start : end]
+            body_files = body_files[start : end]
 
         if not face_files:
             print(f"No face files found to process in {self.dlc_dir}.")
@@ -104,7 +110,7 @@ class MouseFlow:
         ]
 
         if not candidates:
-            raise FileNotFoundError(f"No video starting with '{prefix}' in {self.dlc_dir}")
+            raise FileNotFoundError(f"No video starting with '{prefix}' in {self.dlc_dir.parent}")
 
         if len(candidates) > 1:
             raise RuntimeError(
@@ -174,23 +180,15 @@ class MouseFlow:
         '''
         import torch
         has_cv2_cuda = hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
-        has_pytorch_gpu = torch.cuda.is_available()
 
         if not has_cv2_cuda and (self.cfg.of_backend == "Farneback"):
             print("No Opencv with GPU support detected, sorry. Ensure to have a working nvidia GPU." \
-                "If you have, try switching mf_config.of_backend to 'RAFT' ")
-            return False
-        
-        if not has_pytorch_gpu and (self.cfg.of_backend == "RAFT"):
-            print("No Pytorch with GPU support detected, sorry. Ensure to have a working nvidia GPU." \
-                "If you have, try switching mf_config.of_backend to 'Farneback' ")
+                "If you do not have, try switching mf_config.of_backend to 'DIS' ")
             return False
 
         if has_cv2_cuda and (self.cfg.of_backend == "Farneback"):
             return True
-                
-        if has_pytorch_gpu and (self.cfg.of_backend == "RAFT"):
-            return True
+        
         return False # safe fallback
 
     
@@ -226,22 +224,22 @@ class MouseFlow:
         )
 
         # Extract motion in face regions
-        if not self._has_gpu_support():
-            print("No CUDA support detected. Processing without optical flow...")
-            face_motion = face_processing.facemotion_nocuda(
-                video_file, face_masks)
-            face_raw = pd.concat([pupil_raw, eyelid_dist_raw, face_motion], axis=1)
-        else:
-            face_motion, flow_grid = face_processing.facemotion(video_file, face_masks, backend=self.cfg.of_backend, save_of_vectors=True) # switch between RAFT and Farneback is handled internally
-            whisk_freq = motion_processing.freq_analysis2(
-                face_motion['OFang_Whiskerpad'], fps, rollwin=fps, min_periods=int(fps*.67))
-            sniff_freq = motion_processing.freq_analysis2(
-                face_motion['OFang_Nose'],       fps, rollwin=fps, min_periods=int(fps*.67))
-            chewenv, chew = motion_processing.hilbert_peaks(
-                face_motion['OFang_Mouth'],    fps)
-            face_freq = pd.DataFrame(
-                {'Whisking_freq': whisk_freq, 'Sniff_freq': sniff_freq, 'Chewing_Envelope': chewenv, 'Chew': chew})
-            face_raw = pd.concat([pupil_raw, eyelid_dist_raw, face_motion, face_freq], axis=1)
+        backend = self.cfg.of_backend
+        if not self._has_gpu_support() and backend != 'DIS':
+            print("No CUDA support detected. Switching to DIS optical flow on CPU")
+            backend = "DIS"
+
+        face_motion, flow_grid = face_processing.facemotion(
+            video_file, face_masks, backend=backend, save_of_vectors=self.cfg.save_optical_flow_vectors) # switch between DIS and Farneback is handled internally
+        whisk_freq = motion_processing.freq_analysis2(
+            face_motion['OFang_Whiskerpad'], fps, rollwin=fps, min_periods=int(fps*.67))
+        sniff_freq = motion_processing.freq_analysis2(
+            face_motion['OFang_Nose'],       fps, rollwin=fps, min_periods=int(fps*.67))
+        chewenv, chew = motion_processing.hilbert_peaks(
+            face_motion['OFang_Mouth'],    fps)
+        face_freq = pd.DataFrame(
+            {'Whisking_freq': whisk_freq, 'Sniff_freq': sniff_freq, 'Chewing_Envelope': chewenv, 'Chew': chew})
+        face_raw = pd.concat([pupil_raw, eyelid_dist_raw, face_motion, face_freq], axis=1)
         cap.release()
         face = process_raw_data(self.cfg.smoothing_windows_sec, self.cfg.na_limit, fps, interpolation_limits, face_raw)
         self._face_to_h5(out_file, face_masks, face_anchor, face)
@@ -356,14 +354,16 @@ def runMF(dlc_dir=os.getcwd(),
           faceregions_sizes=None,
           base_resolution=None,
           manual_anchor=None,
-          save_optical_flow_vectors=True       
+          save_optical_flow_vectors=True,
+          batch = None,
+          of_backend="DIS"
     ):
 
         cfg = MFConfig(dgp, conf_thresh,
                     interpolation_limits_sec, smoothing_windows_sec,
                     na_limit, faceregions_sizes,
-                    base_resolution, manual_anchor, "RAFT", overwrite,
-                    save_optical_flow_vectors
+                    base_resolution, manual_anchor, of_backend, overwrite,
+                    save_optical_flow_vectors, batch
         )
 
         mf = MouseFlow(dlc_dir, cfg)

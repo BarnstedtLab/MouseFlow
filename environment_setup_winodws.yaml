@@ -12,15 +12,14 @@ dependencies:
   - torchaudio
   - pytorch-cuda=12.4
   - numpy>=2
+  - h5py
   - pytables>=3.9.2
   - ffmpeg
   - scipy
   - pandas
   - pip
   - pip:
-      - lightning-pose # LightningPose (will use the conda PyTorch you installed)
-      - pyocclient # for downloading owncloud files (the model weights)
-
+      - pyocclient # for downloading owncloud files
 
   # Install DLC manually(!!)
   # (not in this file because the pre release version is needed for pytorch support) via:
