@@ -1,10 +1,11 @@
 # MouseFlow
 
 ## Description
-A Python toolbox to quantify facial and bodily movement in headfixed mice.
+A Python toolbox to quantify fined-scale facial and bodily movement in headfixed mice. MouseFlow integrates pose estimation, optical flow, and kinematic analyses in a single open-source workflow, reducing manual labelling and simultaneously capturing global behavioral dynamics
 ![Sample image](img/103_behaviour.gif)
 
 ## Installation
+<img align="right" width="300" height="300" src="https://github.com/user-attachments/assets/7a01dfbf-11f8-422a-bbee-c270868c1361"/>
 If you already have a working environment (with pytorch and deeplabcut installed) and do not want to create a new one, you can skip directly to step 6.
 Otherwise, just follow along.
  
@@ -47,16 +48,27 @@ runMF(dlc_dir) runs across the resulting marker files and automatically saves da
 * Pupil diameter (extracted based on circular fit of 6 pupil markers)
 * Eye opening (based on distance of upper and lower eyelids)
 * Face regions (automatically segmented based on facial landmarks extracted from markers)
+  
+  _Automatic face segmentation on In-distribution data_
+  
+  <img src="img/faceregions.gif" alt="Sample image" width="300"/>
+  
+  _Automatic face segmentation on Out-of-distribution data from collaborators and the publicly available [IBL Brainwide Map](https://www.internationalbrainlab.com/data) dataset_
+  
+  <img width="300" height="300" src="https://github.com/user-attachments/assets/4f089a92-83c5-498d-a76d-e55a8ddba071"/>
+
 * Motion energy for each face region
 * Optical flow angle and magnitude for each face region (extracted using Farneback dense optical flow)
 * Whisking & sniffing frequency and phase
 * Paw movement, stride frequency, gait information (based on kinematics of paw markers)
 * Paw and tail angles
 
-<img src="img/faceregions.gif" alt="Sample image" width="300"/>
-
 ## Dependencies
-This software relies heavily on [DeepLabCut](https://github.com/DeepLabCut/DeepLabCut/) and [OpenCV](https://opencv.org/) libraries for its functionality.
+This software relies heavily on [DeepLabCut](https://github.com/DeepLabCut/DeepLabCut/), [LightningPose](https://github.com/paninski-lab/lightning-pose), [RAFT](https://github.com/princeton-vl/RAFT) and [OpenCV](https://opencv.org/) libraries for its functionality.
 
 ## Contributors
-DLC models were trained with data from Sanja Mikulovic (LIN Magdeburg), Petra Mocellin (LIN Magdeburg), Liudmila Sosulina (LIN Magdeburg), and Falko Fuhrmann (DZNE Bonn). Code was developed together with Nick del Grosso (Bonn University).
+MouseFlow is under active development and we welcome community contributions. We welcome your feedbacks and ideas. Please get in touch :) 
+
+We thank our collaborators: Janelle Pakan (LIN Magdeburg), Emilie Macé (UMG Göttingen), Simon Musall (RWTH Aachen), Jan Gründemann (DZNE Bonn), Yangfan Peng (Charité Berlin), Ricardo Paricio-Montesinos (DZNE Bonn), Sanja Mikulovic (LIN Magdeburg), Petra Mocellin (LIN Magdeburg), Liudmila Sosulina (LIN Magdeburg), and Falko Fuhrmann (DZNE Bonn) for generously sharing their data, which allowed us to enhance the performance of our pre-trained models.
+
+We are also greatful to Nick del Grosso (iBOTS iBehave Bonn) and Sangeetha Nandakumar (iBOTS iBehave Bonn) for their invaluable support and expertise in Python, especially during the early stage of setting up the package.

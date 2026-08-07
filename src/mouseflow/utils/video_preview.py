@@ -46,7 +46,6 @@ class BasePanel(abc.ABC):
         """Called every frame to draw content."""
         pass
 
-### Implementation for the actual video panels satrt here
 
 # ------------------ Body keypoints panel -----------------------------------
 class KeypointPanel(BasePanel):
@@ -102,7 +101,7 @@ class OpticalFlowPanel(BasePanel):
     Displays the video frame with vector arrows overlayed.
     Arrows are colored by their angle (direction).
     """
-    def __init__(self, key, flow, grid_step=8, arrow_scale=0.6):
+    def __init__(self, key, flow, grid_step=8, arrow_scale=2.0):
         super().__init__(key)
         self.flow = flow       # Shape: [Time, 2, H, W]
         self.grid_step = grid_step
@@ -121,11 +120,22 @@ class OpticalFlowPanel(BasePanel):
     def update(self, ctx: FrameContext):
         bg_img = ctx.frame_gray_face // 2
         self.im_artist.set_data(bg_img)
+
+        flow = self.flow[ctx.frame_idx]
+        u, v = flow[0].copy(), flow[1].copy()
         if self.is_first_frame:
             h, w = bg_img.shape
             self.im_artist.set_extent((0, w, h, 0))
             self.ax.set_xlim(0, w)
             self.ax.set_ylim(h, 0)
+
+            mag = np.sqrt(u**2 + v**2)
+            max_arrow_len = 10.0 
+            mask = mag > max_arrow_len
+            scale_factor = max_arrow_len / mag[mask]
+            
+            u[mask] *= scale_factor
+            v[mask] *= scale_factor
             
             # Positions, where we actually wanna plot the arrows
             flow = self.flow[ctx.frame_idx, :, :, :]
@@ -144,16 +154,15 @@ class OpticalFlowPanel(BasePanel):
                 units='xy', 
                 scale=self.arrow_scale,             # Controls length
                 width=1.,
-                headwidth=2
+                headwidth=4,
+                headaxislength=3.5,
+                alpha=0.8
             )
+            self.quiver_artist.set_clim(-np.pi, np.pi)
             self.is_first_frame = False
 
-        if ctx.frame_idx < self.flow.shape[0]:
-            # Get flow for this frame (shape [2, H, W])
-            flow_slice = self.flow[ctx.frame_idx, :, :, :]
-            u = flow_slice[0]
-            v = flow_slice[1]
 
+        if ctx.frame_idx < self.flow.shape[0]:
             angles = np.arctan2(v, u)
             
             # Update Data
@@ -192,13 +201,13 @@ class PupilPanel(BasePanel):
         y0 = max(0, py - self.h // 2) # height // 2 above the pupil center and below
         
         crop = ctx.frame_gray_face[y0:y0+self.h, x0:x0+self.w]
-        if crop.shape[0] != self.h or crop.shape[1] != self.w: # frame size somehow does not match, better ignore frame
+        if crop.shape[0] != self.h or crop.shape[1] != self.w:
              pass 
         else:
             # We apply the data to the current frame
             self.im_artist.set_data(crop)
 
-        # Fast pupil circle update (we do not draw a new circle, buit just shift and rescale the old one)
+        # pupil circle update
         self.circ_artist.center = (px - x0, py - y0)
         self.circ_artist.radius = pr
 
@@ -274,8 +283,12 @@ class Coordinator:
         self.output_path = output_path
         self.layout = layout
         self.panels = panels
-        self.cap_face = cv2.VideoCapture(video_path_face)
-        self.cap_body = cv2.VideoCapture(video_path_body)
+        self.cap_face = None
+        self.cap_body = None
+        if video_path_face is not None:
+            self.cap_face = cv2.VideoCapture(video_path_face)
+        if video_path_body is not None:
+            self.cap_body = cv2.VideoCapture(video_path_body)
         self.max_frames = int(self.cap_face.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps = self.cap_face.get(cv2.CAP_PROP_FPS)
         self.width = int(self.cap_face.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -299,24 +312,31 @@ class Coordinator:
         writer = cv2.VideoWriter(self.output_path, fourcc, self.fps, (canvas_w, canvas_h))
         
         # Processing Loop
-        self.cap_face.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        self.cap_body.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        if self.cap_face:
+            self.cap_face.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        if self.cap_body:
+            self.cap_body.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         
         print(f"Processing {duration_frames} frames to {self.output_path}...")
         
         for i in tqdm(range(duration_frames)):
-            ok_face, frame_face = self.cap_face.read()
-            ok_body, frame_body = self.cap_body.read()
-            if not ok_face or not ok_body: break
+            frame_body = None
+            frame_face = None
+            if self.cap_face:
+                ok_face, frame_face = self.cap_face.read()
+                if not ok_face: break
+            if self.cap_body:
+                ok_body, frame_body = self.cap_body.read()
+                if not ok_body: break
             
             abs_idx = start_frame + i
             
             ctx = FrameContext(
                 frame_idx=abs_idx,
                 frame_bgr_face=frame_face,
-                frame_gray_face=cv2.cvtColor(frame_face, cv2.COLOR_BGR2GRAY),
+                frame_gray_face=cv2.cvtColor(frame_face, cv2.COLOR_BGR2GRAY) if frame_face is not None else None,
                 frame_bgr_body=frame_body,
-                frame_gray_body=cv2.cvtColor(frame_body, cv2.COLOR_BGR2GRAY),
+                frame_gray_body=cv2.cvtColor(frame_body, cv2.COLOR_BGR2GRAY) if frame_body is not None else None,
                 data_row=df_data.iloc[abs_idx] if df_data is not None else None
             )
             
@@ -335,8 +355,10 @@ class Coordinator:
             writer.write(img_plot)
     
         writer.release()
-        self.cap_face.release()
-        self.cap_body.release()
+        if self.cap_face:
+            self.cap_face.release()
+        if self.cap_body:
+            self.cap_body.release()
         plt.close(fig)
         print("Done.")
 
@@ -357,29 +379,40 @@ def find_file(analysis_dir, pattern, exclude_pattern=None):
 
 
 def fetch_files(face_video_file, body_video_file, analysis_dir):
-    body_video_path = Path(body_video_file)
-    face_video_path = Path(face_video_file)
-
-    body_video_name = body_video_path.stem
-    face_video_name = face_video_path.stem
-
-    dlc_body_file = find_file(analysis_dir, f"{body_video_name}*DLC*.h5", exclude_pattern="mouseflow")
-    dlc_face_file = find_file(analysis_dir, f"{face_video_name}*DLC*.h5", exclude_pattern="mouseflow")
-
-    mf_file_face = find_file(analysis_dir, f"{face_video_name}*mouseflow.h5")
-    of_file_face = find_file(analysis_dir, f"{face_video_name}*optical_flow_grid.npz")
+    dlc_body_file = None
+    dlc_face_file = None
+    mf_file_face = None
+    of_file_face = None
+    if body_video_file:
+        body_video_path = Path(body_video_file)
+        body_video_name = body_video_path.stem
+        dlc_body_file = find_file(analysis_dir, f"{body_video_name}*DLC*.h5", exclude_pattern="mouseflow")
+    
+    if face_video_file:
+        face_video_path = Path(face_video_file)
+        face_video_name = face_video_path.stem
+        dlc_face_file = find_file(analysis_dir, f"{face_video_name}*DLC*.h5", exclude_pattern="mouseflow")
+        mf_file_face = find_file(analysis_dir, f"{face_video_name}*mouseflow.h5")
+        of_file_face = find_file(analysis_dir, f"{face_video_name}*optical_flow_grid.npz")
 
     return dlc_body_file, dlc_face_file, mf_file_face, of_file_face
 
 
 
-def create_video_preview(mf_file_face=None, keypoint_file_face=None, keypoint_file_body=None, video_file_face=None, video_file_body=None, optical_flow_file=None, output_file=None, start_frame=0, n_frames=None):
+def create_video_preview(
+        mf_file_face=None, keypoint_file_face=None,
+        keypoint_file_body=None, video_file_face=None,
+        video_file_body=None,
+        optical_flow_file=None,
+        output_file=None,
+        start_frame=0, n_frames=None,
+        arrow_scale=0.5):
     
     panels_list = []
-
+    mf_face_df = None
     if optical_flow_file:
-        of_grid = np.load(optical_flow_file)["flow"]
-        opticalflow_panel = OpticalFlowPanel(key='optflow', flow=of_grid, arrow_scale=2.)
+        of_grid = np.load(optical_flow_file)["flow"][start_frame : start_frame + n_frames]
+        opticalflow_panel = OpticalFlowPanel(key='optflow', flow=of_grid, arrow_scale=arrow_scale)
         panels_list.append(opticalflow_panel)
     if keypoint_file_face:
         keypoint_face_df = pd.read_hdf(keypoint_file_face)
@@ -397,18 +430,11 @@ def create_video_preview(mf_file_face=None, keypoint_file_face=None, keypoint_fi
             key='traces', 
             df_full=mf_face_df, 
             cols_to_plot=[
-                ('smooth', 'MotionEnergy_Mouth'),
+                ('smooth', 'OFang_Nose'),
                 ('smooth', 'OFang_Whiskerpad')
             ]
         )
         panels_list.append(trace_panel)
-
-    # layout_def = [
-    #     [keypoint_panel_face.key, keypoint_panel_body.key],
-    #     [opticalflow_panel.key, pupil_panel.key],
-    #     [trace_panel.key, trace_panel.key]
-    # ]
-
 
     main_keys = []
     trace_key = None
@@ -437,10 +463,6 @@ def create_video_preview(mf_file_face=None, keypoint_file_face=None, keypoint_fi
         print("No panels to plot.")
     else:
         print("Generated Layout:", layout_def)
-    
-    panels_list = [
-        keypoint_panel_face, keypoint_panel_body, opticalflow_panel, pupil_panel, trace_panel
-    ]
 
 
     viz = Coordinator(
@@ -450,10 +472,16 @@ def create_video_preview(mf_file_face=None, keypoint_file_face=None, keypoint_fi
         layout=layout_def,
         panels=panels_list
     )
+    print("Coordinator created")
     
     viz.run(start_frame=start_frame, duration_frames=n_frames, df_data=mf_face_df)
 
-def generate_preview(vid_file_face, vid_file_body, analysis_dir=None, out_file=None):
+def generate_preview(
+    vid_file_face, vid_file_body=None,
+    analysis_dir=None,
+    out_file=None,
+    n_frames=100,
+    arrow_scale=0.5):
     if analysis_dir is None:
         analysis_dir = str(Path(vid_file_face).parent / "mouseflow")
     
@@ -474,5 +502,6 @@ def generate_preview(vid_file_face, vid_file_body, analysis_dir=None, out_file=N
         video_file_body=vid_file_body,
         optical_flow_file=grid_file,
         output_file=out_file,
-        n_frames=100)
+        n_frames=n_frames,
+        arrow_scale=arrow_scale)
     
