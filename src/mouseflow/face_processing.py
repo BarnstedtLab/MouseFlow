@@ -5,12 +5,9 @@
 Created on Wed May  8 14:31:51 2019
 @author: Oliver Barnstedt
 """
-from typing import NamedTuple
 
-import glob
 from time import time
 import math
-import os.path
 
 import cv2
 import numpy as np
@@ -18,8 +15,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
-from mouseflow.utils.generic import smooth
-from mouseflow.optical_flow import FarnebackOF, BaseOF, DISFlowOF
+from mouseflow.optical_flow import BaseOF, FarnebackOF, DISFlowOF
 
 plt.interactive(False)
 
@@ -133,6 +129,8 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
     forehead_pt= get_pt('forehead')
     chin_pt    = get_pt('chin')
     eyelid_pt  = get_pt('eyelid_bottom')
+    face_anchor.at['x', 'whiskerpad_center'] = np.nan
+    face_anchor.at['y', 'whiskerpad_center'] = np.nan
 
     # whisker inference
     whisker_r = 0.0
@@ -143,6 +141,8 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
             nose_pt,
             mouth_pt,
             tear_pt]).mean(axis=0)).astype(int))
+        face_anchor.at['x', 'whiskerpad_center'] = centre_whiskers[0]
+        face_anchor.at['y', 'whiskerpad_center'] = centre_whiskers[1]
         a = np.linalg.norm(mouth_pt - tear_pt)
         b = np.linalg.norm(tear_pt  - nose_pt)
         c = np.linalg.norm(nose_pt  - mouth_pt)
@@ -154,7 +154,7 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
     if nose_pt is None:
         mask_nose = canvas.copy()
     else:
-        centre_nose = tuple((nose_pt + np.array([0.05 * nose_pt[0], -0.03 * nose_pt[1]])).round().astype(int))
+        centre_nose = tuple((nose_pt + np.array([0.24 * nose_pt[0], 0.12 * nose_pt[1]])).round().astype(int))
         axes = get_axes('nose') or (whisker_r*2/3, whisker_r*1/2)
         mask_nose = create_mask(centre_nose, axes, angle=-60.0)
     # mouth inference ellipse
@@ -179,25 +179,25 @@ def define_faceregions(dlc_face, facevid, dlc_file, manual_anchor=None, faceregi
         plt.imshow(firstframe, cmap='gray')
         plt.savefig(str(dlc_file)[:-3] + "_face_regions.png")
     plt.close('all')
-
     return masks, face_anchor
 
-def facemotion(videopath, masks, backend : str, videoslice=[], save_of_vectors=True):
-    optical_flow : BaseOF = None
+def facemotion(videopath, masks, face_anchor, backend : str, videoslice=[], save_of_vectors=True):
+    gpu_flow : BaseOF = None
     if backend == 'Farneback':
-        optical_flow = FarnebackOF()
-    elif backend == 'DIS':
-        optical_flow = DISFlowOF()
+        gpu_flow = FarnebackOF()
+    elif backend == 'DisOF':
+        gpu_flow = DISFlowOF()
     else:
-        raise RuntimeError(f"Unexpected flow type {backend}, expected 'Farneback' or 'DIS'.")
+        raise RuntimeError(f"Unexpected flow type {backend}, expected 'DIS' or 'Farneback'.")
     if videoslice:
         start, end = videoslice[0], videoslice[1]
     else:
         start, end = 0, None
-    optical_flow.open(videopath, start=start, end=end) # opens video
-    optical_flow.set_masks(masks) # upload ROI masks to gpu or load them into RAM
+    gpu_flow.open(videopath, start=start, end=end)# opens video
+    gpu_flow.set_masks(masks) # upload ROI masks to gpu
+    gpu_flow.set_anchors(face_anchor) # anchors for NMF
     start = time()
-    out = optical_flow.run()  # dict of CPU arrays containing below arrays
+    out = gpu_flow.run()  # dict of CPU arrays containing below arrays
     end = time()
     print(f"optical flow took {end - start} seconds")
     motion = np.hstack([out['diff'], out['mag'], out['ang']])
