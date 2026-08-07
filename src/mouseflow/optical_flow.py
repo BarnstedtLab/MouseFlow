@@ -17,18 +17,27 @@ This results in asynchronous and highly performant Optical Flow Calculations.
 The DIS implementation concentrates on vectorizing operations on CPUs. 
 '''
 
+import pandas as pd
 import numpy as np
 from abc import ABC, abstractmethod
 from tqdm import tqdm
 from pathlib import Path
-
-
 import cv2
+import time
+from scipy import sparse
+
+
+from mouseflow.nmf import NMFBuilder
 
 
 class BaseOF(ABC):
     @abstractmethod
     def set_masks(self, masks: list[np.ndarray]):
+        """takes face region masks and pre-uploads them to GPU to reduce costly host-device memory transactions"""
+        ...
+    
+    @abstractmethod
+    def set_anchors(self, masks: pd.DataFrame):
         """takes face region masks and pre-uploads them to GPU to reduce costly host-device memory transactions"""
         ...
     
@@ -86,6 +95,11 @@ class FarnebackOF(BaseOF):
         self.save_vectors = True
         self.downsample_factor = 8
         self.ready_evt = cv2.cuda.Event()
+    
+    
+    def set_anchors(self, masks: pd.DataFrame):
+        """takes face region masks and pre-uploads them to GPU to reduce costly host-device memory transactions"""
+        pass
 
     def set_masks(self, masks: list[np.ndarray]):
         '''Uploads fixed ROI masks to the GPU'''
@@ -304,14 +318,12 @@ class DISFlowOF:
         """
         DIS Optical Flow.
         """
-        cv2.setNumThreads(8)
+        cv2.setNumThreads(16)
         
         self.dis = cv2.DISOpticalFlow_create(preset)
-        # self.dis.setPatchStride(3)
-        
-        # self.dis.setFinestScale(1)
 
         self.masks = []
+        self.masks_sparse = None
         self.px_per_mask = None
         self.cap = None
         self.start = 0
@@ -327,6 +339,8 @@ class DISFlowOF:
         self.cur_gray = None
         self.flow = None
 
+        self.anchors = None
+
     
     def set_masks(self, masks: list[np.ndarray]):
         for i, m in enumerate(masks):
@@ -338,7 +352,21 @@ class DISFlowOF:
             
         self.masks = [m.astype(np.float32) for m in masks]
         self.px_per_mask = np.array([max(m.sum(), 1.0) for m in masks], dtype=np.float32)
-        print(f"{len(self.masks)} Masks set for DIS processing")
+
+        masks_matrix = np.array(self.masks).reshape(len(self.masks), -1)
+        self.masks_sparse = sparse.csr_matrix(masks_matrix)
+        print(f"{len(self.masks)} Masks set for Dense Optical Flow processing")
+    
+    def set_anchors(self, anchors: pd.DataFrame):
+        nosetip = anchors['nosetip'].values
+        tearduct = anchors['tearduct'].values
+        mouth = anchors['mouthtip'].values
+        chin = anchors['chin'].values
+        forehead = anchors['forehead'].values
+
+        whiskerpad_center = np.vstack([nosetip, tearduct, mouth]).mean(axis=0)
+
+        self.anchors = np.array([nosetip, whiskerpad_center, mouth, chin, tearduct, forehead])
 
     def video_info(self):
         return self.nframes, self.fps, self.height, self.width
@@ -363,18 +391,130 @@ class DISFlowOF:
         
         self.height, self.width = frame0.shape[:2]
         
-        # Init Flow Buffer (Re-using this array prevents memory fragmentation)
+        # Init Flow Buffer
         self.mag  = np.empty((self.height, self.width), np.float32)
         self.ang  = np.empty((self.height, self.width), np.float32)
-
-
-        # Prepare prev_gray
         self.prev_gray = cv2.cvtColor(frame0, cv2.COLOR_BGR2GRAY)
         
         # Rewind if we are starting at 0 (since we just read frame 0)
         if self.start == 0:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+
+    def compute_geometric_face_mask(self, padding_pixels=80, forehead_boost_fraction=0.15):
+        """
+        Computes a face mask using anatomical keypoints.
+        Includes safeguards for missing forehead points and extends to the right edge if necessary.
+        Masking out the background drastically improves nmf performance, since only real facial regions are cosidered and not noise.
+        Returns:
+            mask: A binary mask of shape (height, width) where the face region is 1 and the background is 0.
+        """
+
+        padding_pixels = int(padding_pixels)
+        valid_points = [
+            [int(x), int(y)] for x, y in self.anchors 
+            if not (np.isnan(x) or np.isnan(y))
+        ]
+        
+        # Fallback to full-frame if tracking completely  failed
+        if len(valid_points) < 3:
+            return np.ones((self.height, self.width), dtype=np.uint8)
+            
+
+        current_min_y = min(p[1] for p in valid_points)
+        max_y = max(p[1] for p in valid_points)
+
+        boost_pixels = int(self.height * forehead_boost_fraction)
+        safe_min_y = max(0, current_min_y - boost_pixels)
+        
+        center_x = int(np.median([p[0] for p in valid_points]))
+        
+        valid_points.append([center_x, safe_min_y])
+
+        valid_points.append([self.width - 1, safe_min_y])
+        valid_points.append([self.width - 1, max_y])
+
+        valid_points_arr = np.array(valid_points, dtype=np.int32)
+
+        mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        
+        hull = cv2.convexHull(valid_points_arr)
+        
+        cv2.fillPoly(mask, [hull], 1)
+        
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (padding_pixels, padding_pixels))
+        expanded_mask = cv2.dilate(mask, kernel, iterations=1)
+        
+        return expanded_mask
     
+
+    def _build_nmf_calibmatrix(self, calib_frame_idxs, face_mask, w_down, h_down):
+        """
+        Computes optical flow for a set of calibration frames.
+        For NMF we just use the absolute values of the flow vectors (Non-Negative by definition).
+        """
+        flow_buffer = []
+        
+        cap = cv2.VideoCapture(str(self.video_path))
+        if not cap.isOpened():
+            print("Error: Could not open video file.")
+            return []
+
+        print(f'Face mask shape: {face_mask.shape}')
+        
+        if face_mask.ndim > 2:
+            face_mask = face_mask.squeeze()
+            
+        w_down, h_down = int(w_down), int(h_down)
+
+        for target_idx in tqdm(calib_frame_idxs, desc="Extracting Flow Arrays"):
+            start_frame = max(0, target_idx - 1)
+            
+            success = cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            if not success: #frame could not be set, skip this index
+                continue
+            
+            ret1, frame1 = cap.read()
+            ret2, frame2 = cap.read()
+            
+            if not ret1 or not ret2 or frame1 is None or frame2 is None:
+                continue
+                
+            if frame1.shape[:2] != (self.height, self.width) or frame2.shape[:2] != (self.height, self.width):
+                print(f"Warning: Frame shape mismatch at index {start_frame}. Skipping.")
+                continue
+            
+            # Compute optical flow using DIS for the two frames  
+            prev_gray = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+            cur_gray = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+            flow = self.dis.calc(prev_gray, cur_gray, None)
+            flow[face_mask == 0] = 0.0
+            flow_resized = cv2.resize(flow, (w_down, h_down), interpolation=cv2.INTER_AREA)
+            
+            flow_u_calib = flow_resized[..., 0].ravel() #flattened flow in x-direction
+            flow_v_calib = flow_resized[..., 1].ravel() #flattened flow in y-direction
+
+            mag = np.sqrt(flow_u_calib**2 + flow_v_calib**2)
+            flow_u_calib[mag < 0.25] = 0.0
+            flow_v_calib[mag < 0.25] = 0.0
+
+            MAX_MAGNITUDE = np.percentile(mag, 99) # discard the largest 1% of flow vectors to avoid outliers
+            too_fast = mag > MAX_MAGNITUDE
+            
+            valid_fast = too_fast & (mag > 0)
+            flow_u_calib[valid_fast] = (flow_u_calib[valid_fast] / mag[valid_fast]) * MAX_MAGNITUDE
+            flow_v_calib[valid_fast] = (flow_v_calib[valid_fast] / mag[valid_fast]) * MAX_MAGNITUDE
+            
+            u_abs = np.abs(flow_u_calib)
+            v_abs = np.abs(flow_v_calib)
+            rectified_flow = np.concatenate((u_abs, v_abs))
+            
+            rectified_flow = np.nan_to_num(rectified_flow, nan=0.0, posinf=0.0, neginf=0.0)
+            flow_buffer.append(rectified_flow)
+
+        cap.release()
+        return flow_buffer
+        
 
     def run(self):
         max_frames = max(0, self.nframes - self.start)
@@ -383,40 +523,59 @@ class DISFlowOF:
         angs_out = np.empty((max_frames, len(self.masks)), dtype=np.float32)
         diffs_out = np.empty((max_frames, len(self.masks)), dtype=np.float32)
 
-        masks_matrix = np.array(self.masks).reshape(len(self.masks), -1)
         px_counts = self.px_per_mask
-
+        masks_sp = self.masks_sparse
         ret, frame = self.cap.read()
-        if not ret: return {}
+        if not ret:
+            return {}
         
         self.prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         w_downsampled = int(self.width // self.downsample_factor)
         h_downsampled = int(self.height // self.downsample_factor)
-        flow_grids = np.zeros((max_frames, h_downsampled, w_downsampled, 2), dtype=np.float32)
-        self.flow = np.empty((self.height, self.width, 2), dtype=np.float32)
-        frame_idx = 0
         
+        if self.save_vectors:
+            flow_grids = np.empty((max_frames, h_downsampled, w_downsampled, 2), dtype=np.float32)
+        else:
+            flow_grids = None
+        self.flow = np.empty((self.height, self.width, 2), dtype=np.float32)
+        
+        frame_idx = 0
+        starttime = time.time()
+        
+        spatial_scale_factor = 2
+        h_down = int(self.height // spatial_scale_factor)
+        w_down = int(self.width // spatial_scale_factor)
+
+        nmf = NMFBuilder(
+            self.width, self.height, self.masks, self.px_per_mask,
+            self.anchors, n_components=12, n_channels=2
+        )
+        subsampled_frame_idx = nmf.get_frame_idxs(self.video_path, n_calib_frames=300)
+        print(f'gathered {len(subsampled_frame_idx)} frame pairs')
+        face_mask = self.compute_geometric_face_mask(padding_pixels=self.width * 0.2)
+        print(f'got face masks')
+        calib_flows = self._build_nmf_calibmatrix(subsampled_frame_idx, face_mask, w_down, h_down)
+        print('calib flows gathered')
+        nmf.fit(calib_flows)
+        masks_sp, px_counts = nmf.get_dynamic_masks(self.prev_gray, self.video_path)
         while True:
             ret, frame = self.cap.read()
             if not ret or frame_idx >= max_frames - 1:
                 break
             
             self.cur_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
             self.flow = self.dis.calc(self.prev_gray, self.cur_gray, self.flow)
+            flow_u = self.flow[..., 0].ravel()
+            flow_v = self.flow[..., 1].ravel()
 
-            flow = self.flow.reshape(-1, 2)
-            flow_u = flow[:, 0]
-            flow_v = flow[:, 1]
-            mean_x = (masks_matrix @ flow_u) / px_counts
-            mean_y = (masks_matrix @ flow_v) / px_counts
+            mean_x = masks_sp.dot(flow_u) / px_counts
+            mean_y = masks_sp.dot(flow_v) / px_counts
 
             mags_out[frame_idx] = np.sqrt(mean_x**2 + mean_y**2)
             angs_out[frame_idx] = np.arctan2(mean_y, mean_x)
 
-
-            diff = cv2.absdiff(self.cur_gray, self.prev_gray).astype(np.float32)
-            diffs_out[frame_idx] = (masks_matrix @ diff.reshape(-1)) / px_counts
+            diff = cv2.absdiff(self.cur_gray, self.prev_gray).ravel()
+            diffs_out[frame_idx] = masks_sp.dot(diff) / px_counts
 
             if self.save_vectors:
                 flow_grids[frame_idx] = cv2.resize(
@@ -424,15 +583,15 @@ class DISFlowOF:
                     (w_downsampled, h_downsampled), 
                     interpolation=cv2.INTER_AREA
                 )
-
             self.prev_gray = self.cur_gray
             pbar.update(1)
             frame_idx += 1
-
+            
+        endtime = time.time()
+        print(f'optical flow took {endtime - starttime:.2f} secs. - {(frame_idx + 1) / (endtime - starttime):.2f} FPS')
         self.cap.release()
         pbar.close()
 
-    
         return dict(
             diff=diffs_out[:frame_idx],
             mag=mags_out[:frame_idx],
