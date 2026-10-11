@@ -8,6 +8,7 @@ Also initiates Optical Flow calculations.
 
 from pathlib import Path
 import numpy as np
+from sklearn.decomposition import PCA 
 from tqdm import tqdm
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -330,10 +331,44 @@ class FaceAnalyzer():
                 out[key] = int(max(min_frames, round(float(val) * float(fps))))
         return out
 
+    def _perform_pca(self, angles, magnitudes, axis=None, reference_vector=None):
+        u = magnitudes * np.cos(angles)
+        v = magnitudes * np.sin(angles)
+        u = u.flatten()
+        v = v.flatten()
+        if (np.isnan(u).any() or np.isnan(v).any()):
+            print(f"found nans: u -> {np.isnan(u).sum()}, v -> {np.isnan(v).sum()}")
+        u = np.nan_to_num(u, 0.)
+        v = np.nan_to_num(v, 0.)
+
+        X = np.column_stack((u, v))
+        pca = PCA(n_components=1)
+        pca.fit(X)
+
+        if axis is None:
+            main_axis = pca.components_[0]
+            # Flip axis if it points away from the reference vector
+            if reference_vector is not None:
+                if np.dot(main_axis, reference_vector) < 0:
+                    main_axis[0] *= -1
+                    main_axis[1] *= -1
+                    print('Main axis rotated to align with reference vector!')
+        else:
+            main_axis = axis
+            
+        explained_var = pca.explained_variance_ratio_[0]
+        
+        print(f"Main Axis of Motion: u={main_axis[0]:.2f}, v={main_axis[1]:.2f}")
+        print(f"This axis explains {explained_var*100:.1f}% of all movement.")
+
+        # Project data onto the final axis
+        projection = u * main_axis[0] + v * main_axis[1] 
+        return projection, main_axis
+
     def analyse(self, face_file: Path, landmark_dir: Path):
         out_file = face_file.with_name(face_file.stem + '_mouseflow.h5')
         out_grid = face_file.with_name(face_file.stem + '_optical_flow_grid.npz')
-        if out_file.exists() and not self.overwrite:
+        if out_file.exists() and not getattr(self, 'overwrite', False):
             print(f"{out_file} already analysed, skipping ahead...")
             return
         markers_face = load_markers(face_file, key=None)
@@ -364,6 +399,31 @@ class FaceAnalyzer():
             print("No CUDA support detected. Processing with DIS optical flow on your CPU...")
         face_motion, flow_grid = self._facemotion(
             video_file, face_masks, face_anchor)
+            
+        # Perform PCA on Nose (Reference: Downwards, positive Y)
+        nose_pca_proj, _ = self._perform_pca(
+            face_motion['OFang_Nose'].values, 
+            face_motion['OFmag_Nose'].values, 
+            reference_vector=np.array([0.0, 1.0])
+        )
+        face_motion['Projection_Nose'] = nose_pca_proj
+
+        # Perform PCA on Whiskerpad (Reference: Towards Nosetip)
+        nose_pt = face_anchor.loc[['x', 'y'], 'nosetip'].values
+        whisker_pt = face_anchor.loc[['x', 'y'], 'whiskerpad_center'].values
+        
+        if not np.isnan(nose_pt.astype(float)).any() and not np.isnan(whisker_pt.astype(float)).any():
+            ref_whisker = nose_pt - whisker_pt
+        else:
+            ref_whisker = np.array([1.0, 0.0]) # Fallback if points are missing
+            
+        whisker_pca_proj, _ = self._perform_pca(
+            face_motion['OFang_Whiskerpad'].values, 
+            face_motion['OFmag_Whiskerpad'].values, 
+            reference_vector=ref_whisker
+        )
+        face_motion['Projection_Whiskerpad'] = whisker_pca_proj
+
         whisk_freq = freq_analysis2(
             face_motion['OFang_Whiskerpad'], fps, rollwin=fps, min_periods=int(fps*.67))
         sniff_freq = freq_analysis2(

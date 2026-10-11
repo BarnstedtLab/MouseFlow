@@ -369,7 +369,8 @@ class NMFBuilder:
             for nmf_idx, mask_2d in final_masks.items():
                 if nmf_idx in label_map:
                     region_name = label_map[nmf_idx]
-                    
+                    if region_name == 'Chin' or region_name == 'Cheek':
+                        continue
                     cmap = default_cmap
                     for name, cm in cmap_dict_local.items():
                         if name in region_name:
