@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Author: @Jakob Faust
+Date: 11.10.2026
 
+Exposes user functions.
+Initiates face and body keypoint predictions.
+Starts downstream analysis for both body and face.
+
+"""
 
 from pathlib import Path
 

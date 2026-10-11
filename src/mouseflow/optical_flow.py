@@ -1,6 +1,6 @@
 '''
 Author: @Jakob Faust
-Date: 26.03.2026
+Date: 09.10.2026
 
 Optical Flow class that abstracts
     1) GPU: OpenCV Farneback Optical Flow (https://docs.opencv.org/3.4/d4/dee/tutorial_optical_flow.html) with cuda support

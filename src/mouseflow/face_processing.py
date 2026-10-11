@@ -1,6 +1,9 @@
 """
 Author: @Jakob Faust
 Date: 10.10.2026
+
+Class to process face output from Dense Optical Flow.
+Also initiates Optical Flow calculations.
 """
 
 from pathlib import Path

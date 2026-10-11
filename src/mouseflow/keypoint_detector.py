@@ -1,3 +1,12 @@
+"""
+Author: @Jakob Faust
+Date: 10.10.2026
+
+Wrapper class for body and face keypoint models.
+Starts detection process of keypoints.
+"""
+
+
 from pathlib import Path
 from mouseflow.utils.preprocess_video import flip_vid, crop_vid
 from mouseflow.apply_models import LPDetector, DLCDetector, download_models

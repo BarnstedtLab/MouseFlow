@@ -1,6 +1,8 @@
 """
 Author: @Jakob Faust
 Date: 10.10.2026
+
+Class to process keypoint output from body keypoint models (lighning pose or deeplabcut).
 """
 
 

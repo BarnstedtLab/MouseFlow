@@ -1,3 +1,11 @@
+"""
+Author: @Jakob Faust
+Date: 10.10.2026
+
+Includes Lighning pose and Deeplabcut wrappers for predicting keypoints on face and body.
+Includes automatic download of models.
+"""
+
 from abc import ABC, abstractmethod
 import os
 import numpy as np
