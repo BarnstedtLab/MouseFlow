@@ -360,8 +360,7 @@ class NMFBuilder:
         cmap_dict_local = {
             'Whiskerpad': plt.cm.magma,
             'Nose': plt.cm.viridis,
-            'Mouth': plt.cm.plasma,
-            'Chin': plt.cm.winter
+            'Mouth': plt.cm.plasma
         }
         default_cmap = plt.cm.Purples
 
