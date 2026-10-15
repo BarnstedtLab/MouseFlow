@@ -222,7 +222,8 @@ class NMFBuilder:
         overlap_matrix = np.zeros((num_anchors, self.n_components), dtype=np.float32)
         for r_idx in range(num_anchors):
             cx, cy = self.keypoints[r_idx]
-            if np.isnan(cx) or np.isnan(cy):
+            # r_idx < 1 ensures only nose and whiskerpad masks are updated, if removed all facial masks would be updated!!
+            if r_idx > 1 or np.isnan(cx) or np.isnan(cy):
                 overlap_matrix[r_idx, :] = -1.0
                 continue
             y_idx, x_idx = np.indices((self.height, self.width))

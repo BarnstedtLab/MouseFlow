@@ -26,8 +26,160 @@ import cv2
 import time
 from scipy import sparse
 
-
 from mouseflow.nmf import NMFBuilder
+
+class DynamicMasks:
+    def __init__(self, video_path, width, height, preset=cv2.DISOPTICAL_FLOW_PRESET_MEDIUM):
+        self.video_path = video_path
+        self.width = width
+        self.height = height
+        self.masks = []
+        self.px_per_mask = None
+        self.anchors = None
+        
+        # Instantiate a dedicated DIS object (only for NMF mask calibration!)
+        self.dis = cv2.DISOpticalFlow_create(preset)
+
+    def set_masks(self, masks: list[np.ndarray]):
+        for i, m in enumerate(masks):
+            if m.shape != (self.height, self.width):
+                m = m.T
+            if m.shape != (self.height, self.width):
+                raise ValueError(f"Mask shape {m.shape} mismatch with video {(self.height, self.width)}")
+            masks[i] = m
+            
+        self.masks = [m.astype(np.float32) for m in masks]
+        self.px_per_mask = np.array([max(m.sum(), 1.0) for m in masks], dtype=np.float32)
+        print(f"{len(self.masks)} masks set for NMF processing")
+
+    def set_anchors(self, anchors: pd.DataFrame):
+        nosetip = anchors['nosetip'].values
+        tearduct = anchors['tearduct'].values
+        mouth = anchors['mouthtip'].values
+        chin = anchors['chin'].values
+        forehead = anchors['forehead'].values
+
+        whiskerpad_center = np.vstack([nosetip, tearduct, mouth]).mean(axis=0)
+        self.anchors = np.array([nosetip, whiskerpad_center, mouth, chin, tearduct, forehead])
+
+    def compute_geometric_face_mask(self, padding_pixels=35, forehead_boost_fraction=0.15):
+        padding_pixels = int(padding_pixels)
+
+        valid_points = [
+            [int(x), int(y)] for x, y in self.anchors 
+            if not (np.isnan(x) or np.isnan(y))
+        ]
+        
+        if len(valid_points) < 3:
+            return np.ones((self.height, self.width), dtype=np.uint8)
+            
+        current_min_y = min(p[1] for p in valid_points)
+        max_y = max(p[1] for p in valid_points)
+        
+        boost_pixels = int(self.height * forehead_boost_fraction)
+        safe_min_y = max(0, current_min_y - boost_pixels)
+        
+        center_x = int(np.median([p[0] for p in valid_points]))
+        
+        valid_points.append([center_x, safe_min_y])
+        valid_points.append([self.width - 1, safe_min_y])
+        valid_points.append([self.width - 1, max_y])
+
+        valid_points_arr = np.array(valid_points, dtype=np.int32)
+        mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        
+        hull = cv2.convexHull(valid_points_arr)
+        cv2.fillPoly(mask, [hull], 1)
+        
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (padding_pixels, padding_pixels))
+        expanded_mask = cv2.dilate(mask, kernel, iterations=1)
+        
+        return expanded_mask
+
+    def _build_nmf_calibmatrix(self, calib_frame_idxs, face_mask, w_down, h_down):
+        flow_buffer = []
+        cap = cv2.VideoCapture(str(self.video_path))
+        if not cap.isOpened():
+            print("Error: Could not open video file.")
+            return []
+
+        if face_mask.ndim > 2:
+            face_mask = face_mask.squeeze()
+            
+        w_down, h_down = int(w_down), int(h_down)
+
+        for target_idx in tqdm(calib_frame_idxs, desc="Extracting Flow Arrays"):
+            start_frame = max(0, target_idx - 1)
+            success = cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            if not success:
+                continue
+                
+            ret1, frame1 = cap.read()
+            ret2, frame2 = cap.read()
+            
+            if not ret1 or not ret2 or frame1 is None or frame2 is None:
+                continue
+            
+            prev_gray = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+            cur_gray = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+            
+            flow_full = self.dis.calc(prev_gray, cur_gray, None)
+            flow_full[face_mask == 0] = 0.0
+            flow_resized = cv2.resize(flow_full, (w_down, h_down), interpolation=cv2.INTER_AREA)
+            
+            u_2d = flow_resized[..., 0]
+            v_2d = flow_resized[..., 1]
+            flow_u_calib = u_2d.ravel()
+            flow_v_calib = v_2d.ravel()
+
+            mag = np.sqrt(flow_u_calib**2 + flow_v_calib**2)
+            noise_floor = np.percentile(mag, 15) 
+            
+            valid_motion = mag >= noise_floor
+            flow_u_calib[~valid_motion] = 0.0
+            flow_v_calib[~valid_motion] = 0.0
+
+            MAX_VALID_SPEED = np.percentile(mag, 99)
+            too_fast = mag > MAX_VALID_SPEED
+            valid_fast = too_fast & (mag > 0)
+            
+            flow_u_calib[valid_fast] = (flow_u_calib[valid_fast] / mag[valid_fast]) * MAX_VALID_SPEED
+            flow_v_calib[valid_fast] = (flow_v_calib[valid_fast] / mag[valid_fast]) * MAX_VALID_SPEED
+            
+            u_pos = np.maximum(flow_u_calib, 0.0)
+            u_neg = np.maximum(-flow_u_calib, 0.0)
+            v_pos = np.maximum(flow_v_calib, 0.0)
+            v_neg = np.maximum(-flow_v_calib, 0.0)
+            
+            rectified_flow = np.concatenate((u_pos, u_neg, v_pos, v_neg))
+            rectified_flow = np.nan_to_num(rectified_flow, nan=0.0, posinf=0.0, neginf=0.0)
+            flow_buffer.append(rectified_flow)
+
+        cap.release()
+        return flow_buffer
+
+    def generate_updated_masks(self, prev_gray):
+        """Runs the NMF pipeline and returns the updated sparse masks and pixel counts."""
+        spatial_scale_factor = 2 if self.width < 1024 and self.height < 1024 else 4
+        h_down = int(self.height // spatial_scale_factor)
+        w_down = int(self.width // spatial_scale_factor)
+
+        nmf = NMFBuilder(
+            self.width, self.height, self.masks, self.px_per_mask,
+            self.anchors, n_components=12, n_channels=4, down_factor=spatial_scale_factor,
+        )
+        
+        subsampled_frame_idx = nmf.get_frame_idxs(self.video_path, n_calib_frames=400)
+        print(f'Gathered {len(subsampled_frame_idx)} frame pairs for NMF calibration')
+        
+        face_mask = self.compute_geometric_face_mask(padding_pixels=self.width * 0.1)
+        calib_flows = self._build_nmf_calibmatrix(subsampled_frame_idx, face_mask, w_down, h_down)
+        
+        nmf.fit(calib_flows)
+        del calib_flows
+        
+        # Return the finalized sparse masks and pixel counts
+        return nmf.get_dynamic_masks(prev_gray, self.video_path)
 
 
 class BaseOF(ABC):
@@ -56,11 +208,6 @@ class BaseOF(ABC):
         """Returns number of video frames"""
         ...
 
-import cv2
-import numpy as np
-from pathlib import Path
-from tqdm import tqdm
-
 class FarnebackOF(BaseOF):
     def __init__(self, config_args=None, n_iters=3):
         super().__init__()
@@ -72,7 +219,6 @@ class FarnebackOF(BaseOF):
         self.compute_stream = cv2.cuda.Stream()
         self.copy_stream = cv2.cuda.Stream()
         
-        # State variables describing the whole intput 
         self.masks_np = None
         self.masks_gpu = []
         self.px_per_mask = None
@@ -80,29 +226,21 @@ class FarnebackOF(BaseOF):
         self.video_path = None
         self.cap = None
 
-        # Video info
         self.nframes = 0
         self.fps = 0
         self.height = 0
         self.width = 0
 
-        # Persistent GPU/CPU Buffers needed for tracking processing progress
         self.gpu_bgr = None
         self.gpu_gray = None
         self.gpu_gray_f32 = None
         self.host_buf = None 
 
-        self.save_vectors = True
+        self.save_vectors = False
         self.downsample_factor = 8
         self.ready_evt = cv2.cuda.Event()
     
-    
-    def set_anchors(self, masks: pd.DataFrame):
-        """takes face region masks and pre-uploads them to GPU to reduce costly host-device memory transactions"""
-        pass
-
     def set_masks(self, masks: list[np.ndarray]):
-        '''Uploads fixed ROI masks to the GPU'''
         self.masks_np = [np.ascontiguousarray(m.astype('f4')) for m in masks]
         self.px_per_mask = np.array([m.sum() for m in masks], dtype='f4')
         self.masks_gpu = []
@@ -119,7 +257,6 @@ class FarnebackOF(BaseOF):
         return self.nframes, self.fps, self.height, self.width
 
     def open(self, video_path: str, start=0, end=None):
-        '''Opens a video file and primes the first two frames onto the GPU'''
         self.close() 
 
         self.cap = cv2.VideoCapture(video_path)
@@ -144,7 +281,6 @@ class FarnebackOF(BaseOF):
         self.height, self.width = self.shape[:2]
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
 
-        # Pre-allocate pinned memory and GPU buffers for the two rotating frames
         self.host_buf = np.empty((self.height, self.width, 3), dtype=np.uint8)
         cv2.cuda.registerPageLocked(self.host_buf) 
 
@@ -152,7 +288,6 @@ class FarnebackOF(BaseOF):
         self.gpu_gray = [cv2.cuda_GpuMat(self.height, self.width, cv2.CV_8UC1) for _ in range(2)]
         self.gpu_gray_f32 = [cv2.cuda_GpuMat(self.height, self.width, cv2.CV_32FC1) for _ in range(2)]
 
-        # Upload and convert the first two frames
         for i, frame in enumerate([frame0, frame1]):
             self.host_buf[:] = frame
             self.gpu_bgr[i].upload(self.host_buf, stream=self.copy_stream)
@@ -163,18 +298,15 @@ class FarnebackOF(BaseOF):
         self.compute_stream.waitEvent(self.ready_evt)
 
     def close(self):
-        # Free page-locked RAM
         if hasattr(self, 'host_buf') and self.host_buf is not None:
             try: cv2.cuda.unregisterPageLocked(self.host_buf)
             except Exception: pass
             self.host_buf = None
             
-        # Release video file
         if hasattr(self, 'cap') and self.cap is not None:
             self.cap.release()
             self.cap = None
 
-        # Free GPU memory buffers
         for attr in ['gpu_bgr', 'gpu_gray', 'gpu_gray_f32']:
             if hasattr(self, attr) and getattr(self, attr) is not None:
                 for mat in getattr(self, attr):
@@ -185,21 +317,10 @@ class FarnebackOF(BaseOF):
         self.close()
 
     def _allocate_run_buffers(self, max_frames, num_masks, ds_height, ds_width):
-        """
-        Helper function to allocate GPU and CPU RAM memory efficiently
-        The function is needed for the optical flow calculations 
-        """
-
-        # GPU arrays for optical flow calculations and roi wise averaging
         gpu = {
             'flow': cv2.cuda_GpuMat(self.height, self.width, cv2.CV_32FC2),
             'flow_x': cv2.cuda_GpuMat(self.height, self.width, cv2.CV_32FC1),
             'flow_y': cv2.cuda_GpuMat(self.height, self.width, cv2.CV_32FC1),
-            'flow_small': cv2.cuda_GpuMat(ds_height, ds_width, cv2.CV_32FC2),
-            'flow_x_small': cv2.cuda_GpuMat(ds_height, ds_width, cv2.CV_32FC1),
-            'flow_y_small': cv2.cuda_GpuMat(ds_height, ds_width, cv2.CV_32FC1),
-            
-            # ROI intermediate buffers
             'sum_u64': [cv2.cuda_GpuMat(1, 1, cv2.CV_64F) for _ in range(num_masks)],
             'sum_v64': [cv2.cuda_GpuMat(1, 1, cv2.CV_64F) for _ in range(num_masks)],
             'sum_diff64': [cv2.cuda_GpuMat(1, 1, cv2.CV_64F) for _ in range(num_masks)],
@@ -208,15 +329,19 @@ class FarnebackOF(BaseOF):
             'sum_diff32': [cv2.cuda_GpuMat(1, 1, cv2.CV_32F) for _ in range(num_masks)],
         }
         
-        # CPU arrays for output handling
         cpu = {
             'mag': np.empty((max_frames, num_masks), dtype=np.float32),
             'ang': np.empty((max_frames, num_masks), dtype=np.float32),
             'diff': np.empty((max_frames, num_masks), dtype=np.float32),
-            'flow_grid': np.ascontiguousarray(np.empty((max_frames, ds_height, ds_width, 2), dtype=np.float32))
         }
         
-        # Keep all cpu arrays in RAM at fixed positions for faster GPU - CPU data transfre
+        # Only allocate vector field buffers if requested
+        if self.save_vectors:
+            gpu['flow_small'] = cv2.cuda_GpuMat(ds_height, ds_width, cv2.CV_32FC2)
+            gpu['flow_x_small'] = cv2.cuda_GpuMat(ds_height, ds_width, cv2.CV_32FC1)
+            gpu['flow_y_small'] = cv2.cuda_GpuMat(ds_height, ds_width, cv2.CV_32FC1)
+            cpu['flow_grid'] = np.ascontiguousarray(np.empty((max_frames, ds_height, ds_width, 2), dtype=np.float32))
+        
         cv2.cuda.registerPageLocked(cpu['mag'])
         cv2.cuda.registerPageLocked(cpu['ang'])
         cv2.cuda.registerPageLocked(cpu['diff'])
@@ -239,18 +364,18 @@ class FarnebackOF(BaseOF):
         try:
             with tqdm(total=max_frames) as pbar:
                 while True:
-                    # Compute optical flow and downsample for later flow field saving
                     self.of.calc(self.gpu_gray[prev], self.gpu_gray[cur], gpu['flow'], stream=self.compute_stream)
                     cv2.cuda.split(gpu['flow'], [gpu['flow_x'], gpu['flow_y']], stream=self.compute_stream)
                     
-                    cv2.cuda.resize(gpu['flow_x'], (ds_width, ds_height), dst=gpu['flow_x_small'], interpolation=cv2.INTER_AREA, stream=self.compute_stream)
-                    cv2.cuda.resize(gpu['flow_y'], (ds_width, ds_height), dst=gpu['flow_y_small'], interpolation=cv2.INTER_AREA, stream=self.compute_stream)
-                    cv2.cuda.merge([gpu['flow_x_small'], gpu['flow_y_small']], gpu['flow_small'], stream=self.compute_stream)
+                    # Only execute the heavy downsampling and merging if saving vectors
+                    if self.save_vectors:
+                        cv2.cuda.resize(gpu['flow_x'], (ds_width, ds_height), dst=gpu['flow_x_small'], interpolation=cv2.INTER_AREA, stream=self.compute_stream)
+                        cv2.cuda.resize(gpu['flow_y'], (ds_width, ds_height), dst=gpu['flow_y_small'], interpolation=cv2.INTER_AREA, stream=self.compute_stream)
+                        cv2.cuda.merge([gpu['flow_x_small'], gpu['flow_y_small']], gpu['flow_small'], stream=self.compute_stream)
                     
                     diff = cv2.cuda.absdiff(self.gpu_gray_f32[cur], self.gpu_gray_f32[prev], stream=self.compute_stream)
                     compute_done_evt.record(self.compute_stream)
 
-                    # Asynchronously read and upload next video frame from CPU to GPU
                     ret, next_frame = self.cap.read()
                     if not ret:
                         break
@@ -260,23 +385,21 @@ class FarnebackOF(BaseOF):
                     cv2.cuda.cvtColor(self.gpu_bgr[prev], cv2.COLOR_BGR2GRAY, dst=self.gpu_gray[prev], stream=self.copy_stream)
                     self.gpu_gray_f32[prev] = self.gpu_gray[prev].convertTo(cv2.CV_32F, stream=self.copy_stream)
 
-                    # Download downsampled flow to cpu (while processing continous on gpu) 
                     self.copy_stream.waitEvent(compute_done_evt)
-                    gpu['flow_small'].download(stream=self.copy_stream, dst=cpu['flow_grid'][out_idx])
                     
-                    # ROI wise statistics
+                    # Only download the vector grid if requested
+                    if self.save_vectors:
+                        gpu['flow_small'].download(stream=self.copy_stream, dst=cpu['flow_grid'][out_idx])
+                    
                     for i, (mask_gpu, px_count) in enumerate(zip(self.masks_gpu, self.px_per_mask)):
-                        # Mask out all pixels that are not within a ROI
                         flow_x_masked = cv2.cuda.multiply(gpu['flow_x'], mask_gpu, stream=self.compute_stream)
                         flow_y_masked = cv2.cuda.multiply(gpu['flow_y'], mask_gpu, stream=self.compute_stream)
                         diff_masked = cv2.cuda.multiply(diff, mask_gpu, stream=self.compute_stream)
 
-                        # Sum all vectors ROI wise and get the absolute difference ROI wise
                         cv2.cuda.calcSum(flow_x_masked, gpu['sum_u64'][i], mask=None, stream=self.compute_stream)
                         cv2.cuda.calcSum(flow_y_masked, gpu['sum_v64'][i], mask=None, stream=self.compute_stream)
                         cv2.cuda.calcAbsSum(diff_masked, gpu['sum_diff64'][i], mask=None, stream=self.compute_stream)
 
-                        # Downcast averages from float64 to float32 and download to CPU RAM 
                         gpu['sum_u32'][i] = gpu['sum_u64'][i].convertTo(cv2.CV_32F, stream=self.compute_stream)
                         gpu['sum_v32'][i] = gpu['sum_v64'][i].convertTo(cv2.CV_32F, stream=self.compute_stream)
                         gpu['sum_diff32'][i] = gpu['sum_diff64'][i].convertTo(cv2.CV_32F, stream=self.compute_stream)
@@ -285,13 +408,11 @@ class FarnebackOF(BaseOF):
                         v = gpu['sum_v32'][i].download(stream=self.copy_stream)
                         cpu['diff'][out_idx:out_idx+1, i] = gpu['sum_diff32'][i].download(stream=self.copy_stream)
 
-                        # Calculate mean magnitude and angle on cpu
                         mean_u = u / px_count
                         mean_v = v / px_count
                         cpu['mag'][out_idx, i] = np.sqrt(mean_u**2 + mean_v**2)
                         cpu['ang'][out_idx, i] = np.arctan2(mean_v, mean_u)
 
-                    #cleanup and rotate bufferfs to process next frame
                     pbar.update(1)
                     frame_idx += 1
                     out_idx += 1
@@ -301,28 +422,25 @@ class FarnebackOF(BaseOF):
                     self.ready_evt.record(self.copy_stream)
                     self.compute_stream.waitEvent(self.ready_evt)
 
-                    # Swap buffers
                     prev, cur = cur, prev 
 
-            # Format final outputs
             px = np.maximum(np.asarray(self.px_per_mask, dtype=np.float32), 1.0)
             return dict(
                 diff = (cpu['diff'][:out_idx, :] / px[None, :]).astype(np.float32),
                 mag  = cpu['mag'][:out_idx, :].astype(np.float32),
                 ang  = cpu['ang'][:out_idx, :].astype(np.float32),
-                flow_grid = cpu['flow_grid'][:out_idx].transpose(0, 3, 1, 2)
+                # Respect the save_vectors flag in the final return dict!
+                flow_grid = cpu['flow_grid'][:out_idx].transpose(0, 3, 1, 2) if self.save_vectors else None
             )
 
         finally:
             self.copy_stream.waitForCompletion()
             self.compute_stream.waitForCompletion()
             
-            # Unregister page-locked RAM in case initialization failed mid-way
             for arr in ['mag', 'ang', 'diff']:
                 try: cv2.cuda.unregisterPageLocked(cpu[arr])
                 except: pass
             
-            #  Release the temp buffers from VRAM
             if 'gpu' in locals():
                 for k, v in gpu.items():
                     if isinstance(v, list):
@@ -334,7 +452,7 @@ class FarnebackOF(BaseOF):
 
 
 
-class DISFlowOF:
+class DISFlowOF(BaseOF):
     def __init__(self, preset=cv2.DISOPTICAL_FLOW_PRESET_MEDIUM):
         """
         DIS Optical Flow.
@@ -436,135 +554,6 @@ class DISFlowOF:
     def __del__(self):
         self.close()
 
-    def compute_geometric_face_mask(self, padding_pixels=35, forehead_boost_fraction=0.15):
-        """
-        Computes a lose face mask using anatomical keypoints.
-        Includes safeguards for missing forehead points and extends to the right edge.
-        """
-
-        padding_pixels = int(padding_pixels)
-
-        # Filter out missing / NaN coordinates
-        valid_points = [
-            [int(x), int(y)] for x, y in self.anchors 
-            if not (np.isnan(x) or np.isnan(y))
-        ]
-        
-        # Fallback to full-frame mask if tracking completely failed
-        if len(valid_points) < 3:
-            return np.ones((self.height, self.width), dtype=np.uint8)
-            
-        # Find the raw vertical bounds of whatever points are available
-        current_min_y = min(p[1] for p in valid_points)
-        max_y = max(p[1] for p in valid_points)
-        
-        boost_pixels = int(self.height * forehead_boost_fraction)
-        safe_min_y = max(0, current_min_y - boost_pixels) # move up the top the mask by 15% above the highest available landmark, just to be safe
-        
-        # Find the horizontal center of the points to place a virtual anchor
-        center_x = int(np.median([p[0] for p in valid_points]))
-        
-        # Inject the virtual forehead point
-        valid_points.append([center_x, safe_min_y])
-
-        # extend the face mask to the very righ image edge (assumes face only video frame content!)
-        valid_points.append([self.width - 1, safe_min_y])
-        valid_points.append([self.width - 1, max_y])
-
-        # Convert to the NumPy array shape cv2 expects
-        valid_points_arr = np.array(valid_points, dtype=np.int32)
-
-        # Create a blank frame
-        mask = np.zeros((self.height, self.width), dtype=np.uint8)
-        
-        # Compute the Convex Hull 
-        hull = cv2.convexHull(valid_points_arr)
-        
-        # Fill the polygon with all 1s
-        cv2.fillPoly(mask, [hull], 1)
-        
-        # Expand the polygon to include conservatively include the whole face.
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (padding_pixels, padding_pixels))
-        expanded_mask = cv2.dilate(mask, kernel, iterations=1)
-        
-        return expanded_mask
-    
-    def _build_nmf_calibmatrix(self, calib_frame_idxs, face_mask, w_down, h_down):
-        flow_buffer = []
-        
-        cap = cv2.VideoCapture(str(self.video_path))
-        if not cap.isOpened():
-            print("Error: Could not open video file.")
-            return []
-
-        if face_mask.ndim > 2:
-            face_mask = face_mask.squeeze()
-            
-        w_down, h_down = int(w_down), int(h_down)
-
-        for target_idx in tqdm(calib_frame_idxs, desc="Extracting Flow Arrays"):
-            start_frame = max(0, target_idx - 1)
-            
-            success = cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            if not success:
-                continue
-                
-            ret1, frame1 = cap.read()
-            ret2, frame2 = cap.read()
-            
-            if not ret1 or not ret2 or frame1 is None or frame2 is None:
-                continue
-            
-            prev_gray = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-            cur_gray = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-            
-            # Compute DOF on full resolution
-            flow_full = self.dis.calc(prev_gray, cur_gray, None)
-            
-            # Apply geometric face mask
-            flow_full[face_mask == 0] = 0.0
-            
-            # Downsample flow field to speed up nmf
-            flow_resized = cv2.resize(flow_full, (w_down, h_down), interpolation=cv2.INTER_AREA)
-            
-            u_2d = flow_resized[..., 0]
-            v_2d = flow_resized[..., 1]
-
-            flow_u_calib = u_2d.ravel()
-            flow_v_calib = v_2d.ravel()
-
-            # Suppress camera micro-jitter/noise
-            mag = np.sqrt(flow_u_calib**2 + flow_v_calib**2)
-            noise_floor = np.percentile(mag, 15) 
-            
-            valid_motion = mag >= noise_floor
-            flow_u_calib[~valid_motion] = 0.0
-            flow_v_calib[~valid_motion] = 0.0
-
-            # Artifact drop out (99th percentile speed)
-            MAX_VALID_SPEED = np.percentile(mag, 99)
-            too_fast = mag > MAX_VALID_SPEED
-            valid_fast = too_fast & (mag > 0)
-            
-            flow_u_calib[valid_fast] = (flow_u_calib[valid_fast] / mag[valid_fast]) * MAX_VALID_SPEED
-            flow_v_calib[valid_fast] = (flow_v_calib[valid_fast] / mag[valid_fast]) * MAX_VALID_SPEED
-            
-            
-            # Half-Wave Rectification 
-            u_pos = np.maximum(flow_u_calib, 0.0)
-            u_neg = np.maximum(-flow_u_calib, 0.0)
-            v_pos = np.maximum(flow_v_calib, 0.0)
-            v_neg = np.maximum(-flow_v_calib, 0.0)
-            
-            # create non-negative matrix for this frame for nmf
-            rectified_flow = np.concatenate((u_pos, u_neg, v_pos, v_neg))
-            
-            rectified_flow = np.nan_to_num(rectified_flow, nan=0.0, posinf=0.0, neginf=0.0)
-            flow_buffer.append(rectified_flow)
-
-        cap.release()
-        return flow_buffer
-
     def run(self):
         try:
             max_frames = max(0, self.nframes - self.start)
@@ -591,25 +580,6 @@ class DISFlowOF:
             
             frame_idx = 0
             starttime = time.time()
-            
-            spatial_scale_factor = 2
-            if self.width >= 1024 or self.height >= 1024:
-                spatial_scale_factor = 4
-            h_down = int(self.height // spatial_scale_factor)
-            w_down = int(self.width // spatial_scale_factor)
-
-            nmf = NMFBuilder(
-                self.width, self.height, self.masks, self.px_per_mask,
-                self.anchors, n_components=12, n_channels=4, down_factor=spatial_scale_factor,
-            )
-            subsampled_frame_idx = nmf.get_frame_idxs(self.video_path, n_calib_frames=400)
-            print(f'gathered {len(subsampled_frame_idx)} frame pairs for nmf calibration')
-            face_mask = self.compute_geometric_face_mask(padding_pixels=self.width * 0.1)
-            mask_visual = (face_mask * 255).astype(np.uint8)
-            calib_flows = self._build_nmf_calibmatrix(subsampled_frame_idx, face_mask, w_down, h_down)
-            nmf.fit(calib_flows)
-            del calib_flows
-            masks_sp, px_counts = nmf.get_dynamic_masks(self.prev_gray, self.video_path)
             while True:
                 ret, frame = self.cap.read()
                 if not ret or frame_idx >= max_frames - 1:
@@ -654,5 +624,5 @@ class DISFlowOF:
             mag=mags_out[:frame_idx],
             ang=angs_out[:frame_idx],
             div=diffs_out[:frame_idx],
-            flow_grid=flow_grids[:frame_idx].transpose(0, 3, 1, 2)
+            flow_grid=flow_grids[:frame_idx].transpose(0, 3, 1, 2) if self.save_vectors else None
         )
