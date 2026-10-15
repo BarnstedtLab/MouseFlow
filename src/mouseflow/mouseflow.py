@@ -18,13 +18,13 @@ from mouseflow.keypoint_detector import KeypointDetector
 from mouseflow.utils.filehandler import get_files2analyse
 
 
-def analyse_face(keypoint_dir, overwrite=False, opticalflow_engine='DIS', save_vectorfields=False):
+def analyse_face(keypoint_dir, overwrite=False, opticalflow_engine='DIS', use_nmf_msks=True, save_vectorfields=False):
     face_files = get_files2analyse(keypoint_dir=keypoint_dir, overwrite=overwrite, analysis_type='face')
     if not face_files:
         print(f"No face files found to process in {keypoint_dir}.")
     face_analyzer = FaceAnalyzer(cfg=None, opticalflow_enigne=opticalflow_engine, save_vectorfield=save_vectorfields)
     for current_file in face_files:
-        face_analyzer.analyse(current_file, landmark_dir=keypoint_dir)
+        face_analyzer.analyse(current_file, landmark_dir=keypoint_dir, use_nmf_msks=use_nmf_msks)
 
 def analyse_body(keypoint_dir, overwrite=False):
     body_files = get_files2analyse(keypoint_dir=keypoint_dir, overwrite=overwrite, analysis_type='body')
