@@ -1,4 +1,4 @@
-name: mouseflow_env
+name: mouseflow
 channels:
   - pytorch
   - nvidia
@@ -19,7 +19,8 @@ dependencies:
   - pandas
   - pip
   - pip:
-      - lightning-pose # LightningPose (will use the conda PyTorch you installed)
+      - lightning-pose==1.8.1 # LightningPose (will use the conda PyTorch you installed)
+      - transformers<4.44
       - pyocclient # for downloading owncloud files (the model weights)
 
 

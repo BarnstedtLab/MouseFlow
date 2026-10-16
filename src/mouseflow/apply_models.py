@@ -1,3 +1,11 @@
+"""
+Author: @Jakob Faust
+Date: 10.10.2026
+
+Includes Lighning pose and Deeplabcut wrappers for predicting keypoints on face and body.
+Includes automatic download of models.
+"""
+
 from abc import ABC, abstractmethod
 import os
 import numpy as np
@@ -51,7 +59,7 @@ def detect_engine(cfg_path):
     return None
 
 
-class KeypointDetector(ABC):
+class KeypointEngine(ABC):
     @abstractmethod
     def load_model_cfg(self, model_cfg_path):
         ...
@@ -65,7 +73,7 @@ class KeypointDetector(ABC):
         ...
 
 
-class LPDetector(KeypointDetector):
+class LPDetector(KeypointEngine):
     def __init__(self, model_cfg_path, model_path):
         self.cfg = self.load_model_cfg(model_cfg_path)
         # print(f"config loaded: {self.cfg}")
@@ -73,7 +81,6 @@ class LPDetector(KeypointDetector):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
     
     def load_model_cfg(self, model_cfg_path):
-        # self.model = load_model_from_checkpoint(model_path).eval().cuda()
         from omegaconf import OmegaConf
         cfg = OmegaConf.load(model_cfg_path)
         cfg.model.backbone = cfg.model.get("backbone", "resnet50")
@@ -138,9 +145,8 @@ class LPDetector(KeypointDetector):
                 )
         self.lp_csv_to_dlc_h5(str(preds_csv))
         return preds_csv, labeled_mp4
-    
 
-class DLCDetector(KeypointDetector):
+class DLCDetector(KeypointEngine):
     def __init__(self, model_cfg_path, model_path, shuffle=3):
         self.model_path = model_path
         self.model_cfg = model_cfg_path
